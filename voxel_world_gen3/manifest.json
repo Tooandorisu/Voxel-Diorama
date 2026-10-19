@@ -1,0 +1,22 @@
+{
+  "id": "voxel_world_gen3",
+  "name": "Voxel Diorama (Gen 3)",
+  "version": "1.20.0",
+  "api": 2,
+  "entry": "main.lua",
+  "profile": "content",
+  "category": "GRAPHICS",
+  "games": [
+    "gen3"
+  ],
+  "game_version": ">=0.0.0-0 <2.0.0",
+  "priority": 100,
+  "dependencies": [],
+  "optional_dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "engine_internals"
+  ],
+  "description": "Turns the FireRed/LeafGreen/Ruby/Sapphire/Emerald overworld into a 3D voxel diorama built from the map's own collision and art. Press 6 to cycle OFF/LOW/MID/HIGH.",
+  "github": "Tooandorisu/Voxel-Diorama"
+}

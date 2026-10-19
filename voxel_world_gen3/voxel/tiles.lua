@@ -1,0 +1,115 @@
+-- What a map tile (metatile) holds, read once from the game's own tileset
+-- at full resolution -- not from the quarter-size picture of the screen
+-- the heightfield judges relief by.
+--
+-- The engine keeps every tileset pair's metatiles as image data in three
+-- layers (src/core/game3/tileset_native.lua, built by
+-- src/import/gba/metatile.lua after pret's DrawMetatile):
+--   imageData     drawn under sprites
+--   midImageData  NORMAL: the bottom layer;  COVERED: the top layer
+--   overImageData drawn over sprites (NORMAL / SPLIT: the top layer)
+-- Map designers draw ground in a metatile's bottom layer and the object
+-- standing on it -- a lamp post, a sign, a fence -- in its top layer, so the
+-- top layer's opaque pixels are the object's exact outline.
+--
+-- The answer depends only on (tileset pair, metatile id): every lamp built
+-- from the same tile gets the same verdict, wherever it stands and however
+-- the camera lines up -- in FireRed/LeafGreen and Ruby/Sapphire/Emerald
+-- alike, with no per-map tables.
+
+local use = ...
+local Engine = use("engine")
+
+local Tiles = {}
+
+local floor = math.floor
+local cache = {}
+Tiles._cache = cache
+
+-- for tests: a stand-in for tileset_native
+local source
+function Tiles.setSource(src)
+  source = src
+  for k in pairs(cache) do cache[k] = nil end
+end
+
+local function tileset(pair)
+  local NT = source or Engine.get("src.core.game3.tileset_native")
+  if not (NT and pair) then return nil end
+  -- only a pair already resident: loading one streams and yields, which
+  -- must not happen inside the background rebuild (the field view keeps
+  -- the pairs on screen loaded anyway)
+  return NT._pairs and NT._pairs[pair] or nil
+end
+
+local function opaque(data, x0, y0)
+  local mask, n = {}, 0
+  for y = 0, 15 do
+    for x = 0, 15 do
+      local _, _, _, a = data:getPixel(x0 + x, y0 + y)
+      if a and a > 0.5 then
+        mask[y * 16 + x] = true
+        n = n + 1
+      end
+    end
+  end
+  return mask, n
+end
+
+-- The outline of the object in a metatile's top layer:
+--   { n = opaque pixels, rows, cols, medW = median row width, minX, maxX,
+--     minY, maxY, left/right/top/bottom = touches that edge }
+-- false when the tileset has no layer split (nothing to tell by);
+-- nil while the tileset is not loaded yet (asked again later).
+function Tiles.shape(pair, mid)
+  if not (pair and mid) then return nil end
+  local key = tostring(pair) .. ":" .. tostring(mid)
+  local s = cache[key]
+  if s ~= nil then return s end
+  local ts = tileset(pair)
+  if not ts then return nil end
+  if not (ts.overImageData and ts.midToSlot and ts.cols) then
+    cache[key] = false
+    return false
+  end
+  local slot = ts.midToSlot[mid]
+  if slot == nil then
+    cache[key] = false
+    return false
+  end
+  local x0, y0 = (slot % ts.cols) * 16, floor(slot / ts.cols) * 16
+  local mask, n = opaque(ts.overImageData, x0, y0)
+  -- nothing over sprites: a COVERED metatile keeps its top layer in the
+  -- middle image (a NORMAL one keeps its bottom layer there -- solid ground,
+  -- which reads as a full block, not a post)
+  if n == 0 and ts.midImageData then
+    mask, n = opaque(ts.midImageData, x0, y0)
+  end
+  s = { n = n, rows = 0, cols = 0, medW = 0, minX = 16, maxX = -1, minY = 16, maxY = -1 }
+  local widths = {}
+  local colSeen = {}
+  for y = 0, 15 do
+    local w = 0
+    for x = 0, 15 do
+      if mask[y * 16 + x] then
+        w = w + 1
+        colSeen[x] = true
+        if x < s.minX then s.minX = x end
+        if x > s.maxX then s.maxX = x end
+        if y < s.minY then s.minY = y end
+        if y > s.maxY then s.maxY = y end
+      end
+    end
+    if w > 0 then widths[#widths + 1] = w end
+  end
+  s.rows = #widths
+  for _ in pairs(colSeen) do s.cols = s.cols + 1 end
+  table.sort(widths)
+  s.medW = #widths > 0 and widths[floor((#widths + 1) / 2)] or 0
+  s.left, s.right = s.minX == 0, s.maxX == 15
+  s.top, s.bottom = s.minY == 0, s.maxY == 15
+  cache[key] = s
+  return s
+end
+
+return Tiles
