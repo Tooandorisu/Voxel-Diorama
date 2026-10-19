@@ -1,0 +1,27 @@
+-- Sharing metadata.  Read by tooling and the manager detail pane; never by
+-- the loader's merge.
+return {
+  summary = "A 3D voxel diorama overworld for FireRed, LeafGreen, Ruby, Sapphire and Emerald.",
+  author = "Tooandorisu",
+  tags = { "graphics", "3d", "voxel", "gen3" },
+  differences = {
+    changed = {
+      "the free-roam overworld renders as 3D voxels at window resolution",
+      "TILT is switched off while the voxel view is on",
+    },
+    added = {
+      "hotkey 6: OFF / LOW / MID / HIGH",
+      "mod options: VOXEL VIEW, VOXEL HEIGHT, VOXEL RES, LEAF RELIEF, SHADOWS",
+      "exports level / setLevel for other mods",
+    },
+    known = {
+      "walkable raised plateaus stay at ground level",
+      "OAM field sprites (emotes) lie on the ground plane rather than billboard",
+      "battle transitions play over the flat map",
+    },
+  },
+  credits = {
+    { who = "Gen1Recomp voxel_world / Tilt", for_ = "the world-override and billboard seams this builds on" },
+  },
+  compat = { engine = ">=0.0.0-0 <2.0.0", modApi = 2 },
+}
