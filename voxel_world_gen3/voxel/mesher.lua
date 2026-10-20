@@ -33,6 +33,8 @@ function Mesher.build(grid, VOXEL, tick)
   local F = grid.F or {}
   local B = grid.B or {} -- buildings: the only walls with lit windows
   local SW = grid.SW or {} -- foliage that sways in the wind
+  local U = grid.U or {}     -- art read this far sideways (px), indoors
+  local CAP = grid.CAP or {} -- a wall's top px that hold its art's top row
   local vcols, vrows = grid.vcols, grid.vrows
   local px, py = grid.px, grid.py
 
@@ -79,13 +81,13 @@ function Mesher.build(grid, VOXEL, tick)
     for vx = 0, vcols - 1 do
       local a = k(vx, vy)
       if not done[a] then
-        local h, s, kk, cc, l, f, sw = H[a], S[a], K[a], C[a], L[a], F[a], SW[a]
+        local h, s, kk, cc, l, f, sw, uo = H[a], S[a], K[a], C[a], L[a], F[a], SW[a], U[a]
         leaf, sway = f == true, sw == true
         water = h < 0
         local w = 1
         while vx + w < vcols do
           local c = k(vx + w, vy)
-          if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw then break end
+          if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then break end
           w = w + 1
         end
         local hgt = 1
@@ -93,7 +95,7 @@ function Mesher.build(grid, VOXEL, tick)
           local ok = true
           for i = 0, w - 1 do
             local c = k(vx + i, vy + hgt)
-            if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw then
+            if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then
               ok = false
               break
             end
@@ -107,10 +109,11 @@ function Mesher.build(grid, VOXEL, tick)
         local x1, y1 = px + vx * VOXEL - E, py + vy * VOXEL - E
         local x2, y2 = px + (vx + w) * VOXEL + E, py + (vy + hgt) * VOXEL + E
         local v1, v2 = kk * y1 + cc, kk * y2 + cc
-        vert(x1, y1, h, x1, v1, l, true)
-        vert(x2, y1, h, x2, v1, l, true)
-        vert(x2, y2, h, x2, v2, l, true)
-        vert(x1, y2, h, x1, v2, l, true)
+        local du = uo or 0
+        vert(x1, y1, h, x1 + du, v1, l, true)
+        vert(x2, y1, h, x2 + du, v1, l, true)
+        vert(x2, y2, h, x2 + du, v2, l, true)
+        vert(x1, y2, h, x1 + du, v2, l, true)
         quadIdx()
       end
     end
@@ -201,9 +204,10 @@ function Mesher.build(grid, VOXEL, tick)
   -- sample row for a point at height z on a voxel's wall
   -- (the top's row at y, then down the facade: z = s is the top's row,
   -- z = 0 is s rows further south in the art)
-  local function wallV(y, z, s, kk, cc)
+  local function wallV(y, z, s, kk, cc, cap)
     local t = kk * y + cc
     if s <= 0 then return t end
+    s = s - (cap or 0) -- (the cap holds the top row)
     return t + s - max(0, min(z, s))
   end
 
@@ -211,19 +215,21 @@ function Mesher.build(grid, VOXEL, tick)
   -- the part above it (foliage relief) keeps the roof texture
   -- shear: px the art slides sideways per px of height (rock side walls,
   -- so a face shows rock texture instead of one streaked pixel column)
-  local function wall(ax, ay, bx, by, zb, za, uOff, vOff, s, kk, cc, shade, shear)
+  local function wall(ax, ay, bx, by, zb, za, uOff, vOff, s, kk, cc, shade, shear, cap)
     shear = shear or 0
     local cuts = { zb - E }
+    local sc = cap and (s - cap) or nil
+    if sc and sc > zb and sc < za and sc < s then cuts[#cuts + 1] = sc end
     if s > zb and s < za then cuts[#cuts + 1] = s end
     cuts[#cuts + 1] = za + E
     for c = 1, #cuts - 1 do
       local z1, z2 = cuts[c], cuts[c + 1]
       local d1 = shade * (z1 <= zb + E and FOOT_DARK or 1)
       local d2 = shade
-      vert(ax, ay, z1, ax + uOff + shear * z1, wallV(ay + vOff, z1, s, kk, cc), d1)
-      vert(bx, by, z1, bx + uOff + shear * z1, wallV(by + vOff, z1, s, kk, cc), d1)
-      vert(bx, by, z2, bx + uOff + shear * z2, wallV(by + vOff, z2, s, kk, cc), d2)
-      vert(ax, ay, z2, ax + uOff + shear * z2, wallV(ay + vOff, z2, s, kk, cc), d2)
+      vert(ax, ay, z1, ax + uOff + shear * z1, wallV(ay + vOff, z1, s, kk, cc, cap), d1)
+      vert(bx, by, z1, bx + uOff + shear * z1, wallV(by + vOff, z1, s, kk, cc, cap), d1)
+      vert(bx, by, z2, bx + uOff + shear * z2, wallV(by + vOff, z2, s, kk, cc, cap), d2)
+      vert(ax, ay, z2, ax + uOff + shear * z2, wallV(ay + vOff, z2, s, kk, cc, cap), d2)
       quadIdx()
     end
   end
@@ -235,17 +241,18 @@ function Mesher.build(grid, VOXEL, tick)
     while vx < vcols do
       local a, n = k(vx, vy), k(vx, vy + 1)
       if H[a] > H[n] then
-        local ha, hn, s, kk, cc, l, f, o, sw = H[a], H[n], S[a], K[a], C[a], L[a], F[a], B[a], SW[a]
+        local ha, hn, s, kk, cc, l, f, o, sw, uo, cp = H[a], H[n], S[a], K[a], C[a], L[a], F[a], B[a], SW[a], U[a], CAP[a]
         leaf, obj, sway = f == true, o ~= true and not grid.anyWindows, sw == true
         local w = 1
         while vx + w < vcols do
           local a2, n2 = k(vx + w, vy), k(vx + w, vy + 1)
-          if H[a2] ~= ha or H[n2] ~= hn or S[a2] ~= s or K[a2] ~= kk or C[a2] ~= cc or L[a2] ~= l or F[a2] ~= f or B[a2] ~= o or SW[a2] ~= sw then break end
+          if H[a2] ~= ha or H[n2] ~= hn or S[a2] ~= s or K[a2] ~= kk or C[a2] ~= cc or L[a2] ~= l or F[a2] ~= f or B[a2] ~= o or SW[a2] ~= sw
+              or U[a2] ~= uo or CAP[a2] ~= cp then break end
           w = w + 1
         end
         local y = py + (vy + 1) * VOXEL
         local x1, x2 = px + vx * VOXEL, px + (vx + w) * VOXEL
-        wall(x1 - E, y, x2 + E, y, hn, ha, 0, -0.5, s, kk, cc, SHADE_SOUTH * l * bank(ha, hn))
+        wall(x1 - E, y, x2 + E, y, hn, ha, uo or 0, -0.5, s, kk, cc, SHADE_SOUTH * l * bank(ha, hn), nil, cp)
         vx = vx + w
       else
         vx = vx + 1
@@ -263,12 +270,13 @@ function Mesher.build(grid, VOXEL, tick)
         while vy < vrows do
           local a, n = k(vx, vy), k(nx, vy)
           if H[a] > H[n] then
-            local ha, hn, s, kk, cc, l, rk, f, o, sw = H[a], H[n], S[a], K[a], C[a], L[a], R[a], F[a], B[a], SW[a]
+            local ha, hn, s, kk, cc, l, rk, f, o, sw, uo, cp = H[a], H[n], S[a], K[a], C[a], L[a], R[a], F[a], B[a], SW[a], U[a], CAP[a]
             leaf, obj, sway = f == true, o ~= true and not grid.anyWindows, sw == true
             local hgt = 1
             while vy + hgt < vrows do
               local a2, n2 = k(vx, vy + hgt), k(nx, vy + hgt)
-              if H[a2] ~= ha or H[n2] ~= hn or S[a2] ~= s or K[a2] ~= kk or C[a2] ~= cc or L[a2] ~= l or R[a2] ~= rk or F[a2] ~= f or B[a2] ~= o or SW[a2] ~= sw then break end
+              if H[a2] ~= ha or H[n2] ~= hn or S[a2] ~= s or K[a2] ~= kk or C[a2] ~= cc or L[a2] ~= l or R[a2] ~= rk or F[a2] ~= f or B[a2] ~= o or SW[a2] ~= sw
+                  or U[a2] ~= uo or CAP[a2] ~= cp then break end
               hgt = hgt + 1
             end
             local x = px + (dx > 0 and (vx + 1) or vx) * VOXEL
@@ -278,7 +286,7 @@ function Mesher.build(grid, VOXEL, tick)
             -- slide inward (away from the face) as the wall rises
             -- (forest sides too: a tree block's side smeared one column of
             -- leaves into long stripes down the face)
-            wall(x, y2 + E, x, y1 - E, hn, ha, uOff, 0, s, kk, cc, shade * l * bank(ha, hn), (rk or f) and -dx * 0.4 or 0)
+            wall(x, y2 + E, x, y1 - E, hn, ha, uOff + (uo or 0), 0, s, kk, cc, shade * l * bank(ha, hn), (rk or f) and -dx * 0.4 or 0, cp)
             vy = vy + hgt
           else
             vy = vy + 1

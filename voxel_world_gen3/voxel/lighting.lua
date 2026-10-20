@@ -166,6 +166,36 @@ function Lighting.bake(grid, VOXEL, opts)
     end
   end
 
+  -- Indoors (opts.room): the room's light is brightest in the middle and
+  -- falls off toward its walls and the dark around it, so the floor reads
+  -- as the inside of a box rather than a flat picture.
+  if opts.room then
+    local V = grid.V or {}
+    local D = {}
+    local queue, qh = {}, 1
+    for vy = 0, vrows - 1 do
+      for vx = 0, vcols - 1 do
+        local k = vy * vcols + vx + 1
+        if V[k] or H[k] >= 24 then D[k] = 0; queue[#queue + 1] = k end
+      end
+    end
+    while qh <= #queue do
+      local k = queue[qh]; qh = qh + 1
+      local d = D[k] + 1
+      if d <= 8 then
+        local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+        if vx > 0 and not D[k - 1] then D[k - 1] = d; queue[#queue + 1] = k - 1 end
+        if vx < vcols - 1 and not D[k + 1] then D[k + 1] = d; queue[#queue + 1] = k + 1 end
+        if vy > 0 and not D[k - vcols] then D[k - vcols] = d; queue[#queue + 1] = k - vcols end
+        if vy < vrows - 1 and not D[k + vcols] then D[k + vcols] = d; queue[#queue + 1] = k + vcols end
+      end
+    end
+    for k = 1, vcols * vrows do
+      local d = D[k] or 9
+      if H[k] < 24 then AO[k] = (AO[k] or 1) * (0.8 + 0.2 * math.min(1, d / 8)) end
+    end
+  end
+
   grid.sun, grid.ao = SUN, AO
   grid.glow = Lighting.glow(grid, VOXEL)
   return SUN, AO

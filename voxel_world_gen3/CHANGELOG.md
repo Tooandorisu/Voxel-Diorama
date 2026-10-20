@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.22.0
+
+- PERF STATS indoors: "room hH dD wW sS fF eE" -- wall height, wall rows,
+  wall and side-wall columns, furniture pieces, open-edge wall pieces.
+- Interiors rebuilt as a dollhouse:
+  - The back wall stands as one wall, all of it the same height, its art
+    upright -- no longer a short strip whose pieces stuck out wherever a
+    cabinet stood against it.
+  - The side walls stand as tall as the back wall.
+  - Furniture stands up as boxes as tall as its art: a cabinet or a
+    bookshelf against the wall rises as far as its picture reaches up the
+    wall, a pot is knee-high, a table low.  The height is read from the
+    art (where the wall or floor pattern behind it starts again), so it
+    works in every house, shop and centre without a list.
+  - The floor lies flat.
+  - Walls stand a storey above their art (the top of the picture held),
+    so the room reads as a box you look into; their tops are cut dark,
+    like a dollhouse's.  An alcove whose picture fills the wall above it
+    (a tokonoma, the arch behind a Poke Center counter) is the wall
+    stepping forward.
+  - Open sides closed: most rooms have no side walls on the map (the floor
+    runs to the black), so a thin wall stands along each open edge,
+    showing the back wall's bands and trim running on round the corner.
+  - Room lighting: light from high up toward the back wall -- furniture
+    throws a soft shadow forward, the back wall a band along its foot,
+    and the floor darkens toward the walls and corners (with SUN SHADOWS
+    on).
+  - CAMERA TURN now works indoors too, and rooms are seen from a flatter
+    angle (ten degrees lower), so wall faces and furniture fronts show.
+
 ## 1.21.0
 
 - Footprints.  Characters leave prints where the ground is soft, a pair
