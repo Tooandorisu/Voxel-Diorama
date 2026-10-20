@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.21.0
+
+- Footprints.  Characters leave prints where the ground is soft, a pair
+  every half a cell, left and right foot in turn, fading after a while:
+  - Sand: NPCs, your follower and other characters walking on the
+    beaches and the desert now leave prints too.  (Your own the game
+    already draws.)
+  - Ash: on Route 113, under the falling ash, everyone leaves grey prints
+    on the open ground -- you too.
+  - Wet: out of a puddle or shallow water, a few dark wet prints on the
+    dry ground after you, drying within seconds.
+  - On a bike you leave a tire track instead: one line of marks.  (In
+    sand the game draws its own.)
+  The ground is read from the metatile behaviour, the same sand, puddle
+  and shallow-water values the game's own footprints and splashes use.
+  Prints follow the game's own characters (its objects, you and your
+  follower) by name and position.  Only characters leave prints -- not the game's grass, ash-puff and
+  splash effects -- and never while standing still.
+- New option FOOTPRINTS (on by default).
+- PERF STATS: "prints N +R wW mvM fxF top ..." -- footprints on the
+  ground, laid in the last second, characters followed, of them walking,
+  field effects skipped, and who walked furthest in that second.
+
 ## 1.20.0
 
 - Chimney smoke.  Houses get a small brick chimney on the front slope of

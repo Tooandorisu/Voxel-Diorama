@@ -1,6 +1,6 @@
 # Voxel Diorama (Gen 3)
 
-A graphics mod for Gen1Recomp that turns the overworld of Pokémon FireRed/LeafGreen and Ruby/Sapphire/Emerald into a 3D voxel diorama: buildings, trees and cliffs stand up from the map, with sloped roofs, sun shadows, day and night, night lights, 3D weather, water reflections, swaying trees, fireflies and birds, and chimney smoke.
+A graphics mod for Gen1Recomp that turns the overworld of Pokémon FireRed/LeafGreen and Ruby/Sapphire/Emerald into a 3D voxel diorama: buildings, trees and cliffs stand up from the map, with sloped roofs, sun shadows, day and night, night lights, 3D weather, water reflections, swaying trees, fireflies and birds, chimney smoke, and footprints in sand and ash.
 
 Releases (the zip to install) are on the [Releases](../../releases) page. This repository holds the source.
 
@@ -26,6 +26,7 @@ voxel_world_gen3/
     tiles.lua          street lamps found from the tileset's object layer
     critters.lua       fireflies and birds
     smoke.lua          chimneys and smoke
+    footprints.lua     footprints and tire tracks
     engine.lua         engine module lookup inside the mod sandbox
   tests/
     voxel_world_gen3_test.lua
