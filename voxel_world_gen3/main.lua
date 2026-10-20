@@ -77,6 +77,7 @@ return function(mod)
     { key = "sway", label = "SWAYING TREES", type = "toggle", default = true },
     { key = "critters", label = "FIREFLIES & BIRDS", type = "toggle", default = true },
     { key = "smoke", label = "CHIMNEY SMOKE", type = "toggle", default = true },
+    { key = "footprints", label = "FOOTPRINTS", type = "toggle", default = true },
     { key = "shadows", label = "SHADOWS", type = "toggle", default = true },
     { key = "xray", label = "SEE-THROUGH", type = "toggle", default = true },
     { key = "rate", label = "3D RATE", type = "choice", default = "auto",
@@ -115,6 +116,7 @@ return function(mod)
       sway = mod.options:get("sway") ~= false,
       critters = mod.options:get("critters") ~= false,
       smoke = mod.options:get("smoke") ~= false,
+      footprints = mod.options:get("footprints") ~= false,
       blur = mod.options:get("blur") ~= false,
       roundTrees = mod.options:get("roundTrees") ~= false,
       roofs = mod.options:get("roofs") ~= false,
@@ -190,7 +192,7 @@ return function(mod)
     return next(game, ev)
   end)
 
-  mod.exports.version = "1.20.0"
+  mod.exports.version = "1.21.0"
   mod.exports.level = function() return Bridge.level() end
   -- read-only timings for tools/tests: { capture, render, mesh, avg } in ms
   mod.exports.stats = function()

@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.20.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.21.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -59,7 +59,7 @@ local HF, Mesher, Camera = use("heightfield"), use("mesher"), use("camera")
 -- inside the mod sandbox `package` is a stand-in whose `loaded` is empty, so
 -- every engine lookup must go through require (voxel/engine.lua)
 for _, f in ipairs({ "main.lua", "voxel/bridge.lua", "voxel/cells.lua", "voxel/scene.lua",
-                     "voxel/heightfield.lua", "voxel/mesher.lua", "voxel/camera.lua", "voxel/tiles.lua", "voxel/critters.lua", "voxel/smoke.lua" }) do
+                     "voxel/heightfield.lua", "voxel/mesher.lua", "voxel/camera.lua", "voxel/tiles.lua", "voxel/critters.lua", "voxel/smoke.lua", "voxel/footprints.lua" }) do
   T.check(not read(MOD .. "/" .. f):find("package%.loaded"), f .. " never reads package.loaded")
 end
 do
@@ -1003,6 +1003,89 @@ do
   T.check(g.B[k(1, 2)] and g.B[k(3, 1)], "the house is a building")
   T.check(not g.B[k(5, 2)], "the doorless block (a fountain) is not")
   T.eq(g.buildings, 1, "one building")
+end
+
+do
+  -- footprints: an NPC walking on sand leaves prints, the player does not
+  -- (the game draws its own); on an ash map everyone does; out of a puddle
+  -- a few wet prints, then none
+  local FP = use("footprints")
+  FP.reset()
+  local function ground(kind) return function() return kind end end
+  local npc, pl = { x = 0, y = 0 }, { x = 100, y = 0 }
+  for _ = 1, 40 do
+    npc.x, pl.x = npc.x + 1, pl.x + 1
+    FP.update(1 / 60, "M", { pl, npc }, ground("sand"), 1, false)
+  end
+  local n = #FP._state.prints
+  T.check(n >= 4 and n <= 5, "an NPC on sand leaves a print every 8 px (" .. n .. ")")
+  for _, p in ipairs(FP._state.prints) do T.check(p.x < 60, "none from the player") end
+  FP.update(1 / 60, "OTHER", {}, ground("sand"), nil, false)
+  T.eq(#FP._state.prints, 0, "a new map starts clean")
+  local a = { x = 0, y = 0 }
+  for _ = 1, 40 do a.x = a.x + 1; FP.update(1 / 60, "R113", { a }, ground("open"), 1, true) end
+  T.check(#FP._state.prints >= 4, "on an ash map even the player leaves prints")
+  FP.reset()
+  local w = { x = 0, y = 0 }
+  local g = function(x) return x < 8 and "wet" or "open" end
+  for _ = 1, 200 do w.x = w.x + 1; FP.update(1 / 60, "R", { w }, g, nil, false) end
+  local wet = #FP._state.prints
+  T.check(wet >= 2 and wet <= 14, "a few wet prints out of a puddle, then dry (" .. wet .. ")")
+  local v, nv = FP.build()
+  T.eq(nv, wet * 4, "prints become quads")
+  FP.reset()
+  -- standing still while the camera glides: positions wobble by a fraction
+  -- of a pixel every frame, which must not count as walking
+  local s = { x = 50, y = 50 }
+  for i = 1, 600 do
+    s.x, s.y = 50 + (i % 2) * 0.9, 50 + ((i % 3) == 0 and 0.7 or 0)
+    FP.update(1 / 120, "R113", { s }, ground("open"), nil, true)
+  end
+  T.eq(#FP._state.prints, 0, "a character standing on ash leaves no prints (camera wobble)")
+  -- a slow walker at a high frame rate (half a pixel a frame) still counts
+  local h = { x = 0, y = 0 }
+  for _ = 1, 80 do h.x = h.x + 0.5; FP.update(1 / 120, "R113", { s, h }, ground("open"), nil, true) end
+  T.check(#FP._state.prints >= 4, "half-pixel steps add up (" .. #FP._state.prints .. ")")
+  FP.reset()
+  -- a character the game says is standing leaves nothing, however its
+  -- position creeps; the same creep with moving = true does
+  local c = { x = 0, y = 0, moving = false }
+  for _ = 1, 200 do c.x = c.x + 1; FP.update(1 / 60, "R113", { c }, ground("open"), nil, true) end
+  T.eq(#FP._state.prints, 0, "standing (moving = false): no prints")
+  c.moving = true
+  for _ = 1, 40 do c.x = c.x + 1; FP.update(1 / 60, "R113", { c }, ground("open"), nil, true) end
+  T.check(#FP._state.prints >= 4, "walking (moving = true): prints")
+  FP.reset()
+  -- a step begun and taken back, frame after frame (moving = true, the
+  -- position flicking 3 px forward and back): no prints
+  local f = { id = "f", x = 100, y = 100, moving = true }
+  for i = 1, 600 do
+    f.y = 100 + (i % 2) * 3
+    FP.update(1 / 120, "R113", { f }, ground("open"), nil, true)
+  end
+  T.eq(#FP._state.prints, 0, "a flickering step leaves no prints")
+  FP.reset()
+  -- characters named by the game are followed by name: two walking side by
+  -- side, 3 px apart, each lay their own prints
+  local p1, p2 = { id = "a", x = 0, y = 0, moving = true }, { id = "b", x = 0, y = 3, moving = true }
+  for _ = 1, 40 do
+    p1.x, p2.x = p1.x + 1, p2.x + 1
+    FP.update(1 / 60, "R113", { p2, p1 }, ground("open"), nil, true)
+  end
+  local n2 = #FP._state.prints
+  T.check(n2 >= 8 and n2 <= 10, "two named walkers, a print every 8 px each (" .. n2 .. ")")
+  FP.reset()
+  -- on a bike: one line of tire marks every 4 px, down the middle
+  local b = { id = "player", x = 0, y = 50, moving = true, bike = true }
+  for _ = 1, 40 do b.x = b.x + 1; FP.update(1 / 60, "R113", { b }, ground("open"), 1, true) end
+  local nb = #FP._state.prints
+  T.check(nb >= 8 and nb <= 10, "a bike leaves a mark every 4 px (" .. nb .. ")")
+  local straight = true
+  for _, p in ipairs(FP._state.prints) do
+    if not p.tire or math.abs(p.y - 49) > 0.01 then straight = false end
+  end
+  T.check(straight, "tire marks run in one line, not left and right")
+  FP.reset()
 end
 
 do

@@ -34,6 +34,7 @@ local DayNight = use("daynight")
 local Weather3D = use("weather3d")
 local Critters = use("critters")
 local Smoke = use("smoke")
+local Footprints = use("footprints")
 Smoke.init(HF)
 
 local Bridge = {}
@@ -79,6 +80,7 @@ local settings = {
   sway = true, -- trees and tall grass move in the wind
   critters = true, -- fireflies at night, birds by day
   smoke = true, -- chimneys on houses, smoke rising from them
+  footprints = true, -- prints in sand and ash, wet prints out of puddles
   yaw = 0, -- camera turn in degrees (+ = swing east / RIGHT, - = west / LEFT)
   fov = 30,
 }
@@ -752,9 +754,36 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
       return sx + FOOT_X, sy + FOOT_Y
     end
   end
+  -- Field effects (grass at the feet, ash puffs, splashes, sparkles...)
+  -- are drawn as actors too.  They are marked, so footprints only follow
+  -- characters: an effect's sprite is placed (groundPoint) just before its
+  -- own draw function runs, so that draw marks the slot just taken.
+  local FXm = Engine.get("src.core.game3.field_effects")
+  local fxCollect = FXm and FXm.collectActors
+  if fxCollect then
+    FXm.collectActors = function(list, ...)
+      local n0 = list and #list or 0
+      local r = fxCollect(list, ...)
+      if list then
+        for i = n0 + 1, #list do
+          local e = list[i]
+          local d = type(e) == "table" and e.draw
+          if d then
+            e.draw = function(...)
+              local last = actors[#actors]
+              if last then last.fx = true end
+              return d(...)
+            end
+          end
+        end
+      end
+      return r
+    end
+  end
   if FV and pan ~= 0 then FV.cameraPanY = basePan + pan end
   local okA, errA = pcall(orig, game, W, H, { actorsOnly = true, billboard = true })
   if FV and pan ~= 0 then FV.cameraPanY = basePan end
+  if fxCollect then FXm.collectActors = fxCollect end
   if Tilt then Tilt.groundPoint = groundPoint end
   love.graphics.pop()
   if not okA then error(errA, 0) end
@@ -1088,6 +1117,91 @@ function Bridge.renderPending(R)
       end
       shown[#shown + 1] = a
     end
+  end
+  -- footprints: the ground under each character by its behaviour
+  if settings.footprints ~= false and isOutdoor(provider.def) then
+    local MBm = Engine.get("src.core.game3.mb")
+    state.mbIds = state.mbIds or (function()
+      local ids = {}
+      for _, name in ipairs({ "SAND", "DEEP_SAND", "FOOTPRINTS", "PUDDLE", "SHALLOW_WATER" }) do
+        local ok, v = pcall(MBm and MBm.id or function() end, name)
+        if ok and v ~= nil then ids[v] = name end
+      end
+      return ids
+    end)()
+    local ids = state.mbIds
+    local function groundAt(x, y)
+      local c = provider.cell(math.floor(x / CELL), math.floor(y / CELL))
+      if not c then return nil end
+      local n = c.beh ~= nil and ids[c.beh]
+      if n == "PUDDLE" or n == "SHALLOW_WATER" then return "wet" end
+      if n == "SAND" or n == "DEEP_SAND" or n == "FOOTPRINTS" then return "sand" end
+      if c.kind == "ground" and not c.canopy then return "open" end
+      if c.kind == "door" or c.kind == "ledge" then return "open" end
+      return nil
+    end
+    -- real time since the last footprint update, from the clock: the
+    -- frame delta read here ran some three times slower than real time on
+    -- the phone (prints lived ~50 s instead of 18 and the per-second
+    -- counters ran long, which read as everyone walking at a sprint)
+    local nowT = love.timer and love.timer.getTime and love.timer.getTime() or 0
+    local dtp = math.max(0, math.min(0.1, nowT - (state.printClock or nowT)))
+    state.printClock = nowT
+    local nfx = 0
+    for _, a in ipairs(shown) do if a.fx then nfx = nfx + 1 end end
+    state.printFx = nfx
+    -- The walkers come straight from the game: its objects, the player and
+    -- the follower, each by its own name and at its own position -- not
+    -- from the sprites placed on the flat view.  On Route 113 the sprites'
+    -- positions hopped a pixel or two from frame to frame, and a few
+    -- people standing in the ash laid some hundred prints a second.
+    local walkers, wp, nmv = {}, nil, 0
+    local sxm, sym = state.shiftX or 0, state.shiftY or 0
+    -- (only one actually drawn this frame: the game keeps objects moving
+    -- that are not on screen -- one paced Route 113 at some 300 px/s)
+    local drawn = {}
+    for _, a in ipairs(shown) do if not a.fx then drawn[#drawn + 1] = a end end
+    local function onScreen(x, y)
+      for _, a in ipairs(drawn) do
+        if math.abs(a.x - x) <= 5 and math.abs(a.y - y) <= 5 then return true end
+      end
+      return false
+    end
+    local seenId = {}
+    local function walker(id, px, py, moving, isPlayer, bike)
+      if not (px and py) or seenId[id] then return end
+      seenId[id] = true
+      local x, y = px + CELL / 2, py + CELL - FOOT_INSET
+      if not isPlayer and not onScreen(x, y) then return end
+      if HF.insideAt(state.grid, x - sxm, y - sym) then return end
+      walkers[#walkers + 1] = { id = id, x = x, y = y, moving = moving and true or false, bike = bike or nil,
+        ground = HF.floorAt(state.grid, x - sxm, y - sym) }
+      if moving then nmv = nmv + 1 end
+      if isPlayer then wp = #walkers end
+    end
+    local Obj = Engine.get("src.core.game3.objects")
+    if Obj and Obj.forDraw then
+      local okL, list = pcall(Obj.forDraw)
+      if okL and type(list) == "table" then
+        for _, eo in ipairs(list) do
+          if not eo.foreignMap and eo.px and eo.py then
+            walker(eo, eo.px, eo.py, eo.moving)
+          end
+        end
+      end
+    end
+    local Pl = Engine.get("src.core.game3.player")
+    if Pl and Pl.px and (not Pl.isVisible or Pl.isVisible()) then
+      walker("player", Pl.px, Pl.py, Pl.moving, true, Pl.biking == true)
+    end
+    local Fo = Engine.get("src.world.game3.Follower")
+    local fa = Fo and Fo.actor and Fo.actor()
+    if fa then walker("follower", fa.x, fa.y, fa.walkPhase == 1) end
+    state.printMv = nmv
+    Footprints.update(dtp, provider.mapId, walkers, groundAt, wp, weatherKind(provider.def) == "ash")
+    Scene.setPrints(Footprints.build())
+  else
+    Scene.setPrints({}, 0, {}, 0)
   end
   local BREATH = { off = 0, subtle = 0.022, normal = 0.04 }
   Scene.setActors(shown, SLOT_W, SLOT_H, FOOT_X, FOOT_Y, tonumber(settings.solid) or 0,
@@ -1465,6 +1579,14 @@ function Bridge.install()
           do
             local cs = Critters._state
             text = text .. ("  crit %d/%d f%d"):format(#cs.flies, #cs.birds, cs.flocks or 0)
+            local fs = Footprints._state
+            text = text .. ("  prints %d +%d w%d mv%d fx%d"):format(#fs.prints, fs.rate or 0, #fs.walkers, state.printMv or 0, state.printFx or 0)
+            local tp = fs.top
+            if tp and tp.path > 0 then
+              local who = type(tp.id) == "table" and ("o" .. tostring(tp.id.localId or tp.id.virtualId or "?")) or tostring(tp.id)
+              text = text .. ("  top %s %dpx %s @%d,%d"):format(who, math.floor(tp.path + 0.5), tp.moving and "mv" or "st",
+                math.floor(tp.x), math.floor(tp.y))
+            end
             local ss = Smoke._state
             text = text .. ("  smoke %d/%d%s"):format(#ss.stacks, #ss.puffs, ss.seen and (" v" .. ss.seen) or "")
           end

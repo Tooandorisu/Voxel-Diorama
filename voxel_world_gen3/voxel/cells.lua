@@ -149,7 +149,7 @@ function Cells.provider()
     -- any cell: a cave mouth may not carry a door collision at all
     if kind ~= "solid" and L and Coll and Coll.behaviorOn then
       local ok, beh = pcall(Coll.behaviorOn, d, nx, ny)
-      if ok and beh ~= nil then info.behKnown = true end
+      if ok and beh ~= nil then info.behKnown = true; info.beh = beh end
       if ok and beh == CAVE_DOOR then info.caveDoor = true end
       if ok and beh ~= nil and (beh == WARP_DOOR or beh == GYM_DOOR) then info.warpDoor = true end
     end

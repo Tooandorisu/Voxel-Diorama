@@ -456,6 +456,24 @@ local function puffTexture()
   return puffImage
 end
 
+-- a small solid oval with a soft rim (footprints)
+local printImage
+local function printTexture()
+  if printImage then return printImage end
+  local n = 8
+  local data = love.image.newImageData(n, n)
+  for y = 0, n - 1 do
+    for x = 0, n - 1 do
+      local dx, dy = (x + 0.5 - n / 2) / (n / 2), (y + 0.5 - n / 2) / (n / 2)
+      local d = math.sqrt(dx * dx + dy * dy)
+      data:setPixel(x, y, 1, 1, 1, d < 0.7 and 1 or (d < 1 and (1 - d) / 0.3 or 0))
+    end
+  end
+  printImage = love.graphics.newImage(data)
+  printImage:setFilter("linear", "linear")
+  return printImage
+end
+
 local function shadowTexture()
   if shadowImage then return shadowImage end
   local w, h = 16, 8
@@ -568,6 +586,10 @@ end
 -- (-2) so it never shows through anything that was built.
 function Scene.setWeather(verts, nv, idx, ni)
   fill("weather", verts, nv, idx, ni)
+end
+
+function Scene.setPrints(v, n, idx, ni)
+  fill("prints", v, n or 0, idx, ni)
 end
 
 function Scene.setSmoke(cv, cn, ci, cni, pv, pn, pi, pni)
@@ -752,6 +774,15 @@ function Scene.render(p)
   drawMesh("backdrop")
 
   send("uEdge", 0)
+  -- footprints (footprints.lua): pressed into the ground, under everything
+  if (meshes.prints and meshes.prints.count or 0) > 0 then
+    love.graphics.setDepthMode("lequal", false)
+    send("uTex", printTexture())
+    send("uOrigin", { 0, 0 })
+    send("uSize", { 8, 8 })
+    send("uCutout", 0.01)
+    drawMesh("prints")
+  end
   -- blob shadows: depth-tested, never written, so they cannot hide a sprite
   if p.shadows ~= false then
     love.graphics.setDepthMode("lequal", false)
