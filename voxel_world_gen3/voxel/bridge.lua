@@ -83,6 +83,7 @@ local settings = {
   critters = true, -- fireflies at night, birds by day
   smoke = true, -- chimneys on houses, smoke rising from them
   footprints = true, -- prints in sand and ash, wet prints out of puddles
+  clouds = true, -- cloud shadows drifting over the ground, clouds and stars in the sky
   yaw = 0, -- camera turn in degrees (+ = swing east / RIGHT, - = west / LEFT)
   fov = 30,
 }
@@ -1316,7 +1317,27 @@ function Bridge.renderPending(R)
       skyBottom = { skyBottom[1] * wt[1], skyBottom[2] * wt[2], skyBottom[3] * wt[3] }
     end
   end
+  -- clouds: their shadows drift over the land by day, with the wind; the
+  -- sky has clouds by day and stars by night.  Outdoors, under an open sky
+  -- (rain, snow and ash bring their own grey).
+  local clouds, sky
+  if settings.clouds ~= false and isOutdoor(provider.def) and not weatherKind(provider.def) then
+    local now = love.timer and love.timer.getTime() or 0
+    local cdt = math.max(0, math.min(0.1, now - (state.cloudClock or now)))
+    state.cloudClock = now
+    local spd = 7 * (state.wind or 0.9)
+    state.cloudX = ((state.cloudX or 0) - spd * cdt) % 4096
+    state.cloudY = ((state.cloudY or 0) - spd * 0.35 * cdt) % 4096
+    local night = Bridge.nightLevel(dayNight(provider.def))
+    local day = 1 - night
+    -- (by night the moon's: fainter, still drifting)
+    clouds = { x = state.cloudX, y = state.cloudY, size = 560, strength = 0.2 * day + 0.12 * night }
+    local t = tint or { 1, 1, 1 }
+    sky = { clouds = day, stars = night > 0.4 and (night - 0.4) / 0.6 or 0, time = now,
+      speed = spd, color = { math.min(1, 0.55 + 0.5 * t[1]), math.min(1, 0.55 + 0.5 * t[2]), math.min(1, 0.55 + 0.5 * t[3]) } }
+  end
   local okR = Scene.render({
+    clouds = clouds, sky = sky,
     target = target, cam = cam,
     view = Camera.view(cam), proj = Camera.projection(cam, true),
     shiftX = state.shiftX, shiftY = state.shiftY,

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.23.0
+
+- Clouds & stars.  Outdoors under an open sky:
+  - By day, soft cloud shadows drift across the land with the wind --
+    over the ground, the walls and roofs, and the people walking about.
+    Stronger wind, faster clouds.
+  - Clouds drift across the sky above the far edge of the map, tinted by
+    the hour (warm at sunset).
+  - At night the sky fills with twinkling stars, and they shine in the
+    sea, ponds and rivers too, trembling with the waves (the sky itself
+    is often off the top of the screen).  The moon's cloud shadows drift
+    over the land, fainter.
+  Not indoors or in caves, and not in rain, snow or falling ash (their
+  own grey sky).
+- New option CLOUDS & STARS (on by default).
+
 ## 1.22.0
 
 - PERF STATS indoors: "room hH dD wW sS fF eE" -- wall height, wall rows,

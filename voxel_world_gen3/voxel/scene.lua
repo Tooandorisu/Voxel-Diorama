@@ -116,6 +116,11 @@ uniform vec2 uScreen;    // target size in pixels
 uniform float uWaterLvl; // water surface height (pixel stage copy)
 uniform float uMirror;   // 1 while drawing the mirrored pass (pixel stage)
 uniform float uActors;   // 1 while drawing characters (vertex alpha 0.988 = blinking)
+uniform Image uCloud;    // cloud shadows: a tiling pattern, r = cloud
+uniform float uCloudOn;  // how dark a cloud's shadow is (0 = none)
+uniform LOVE_HIGHP_OR_MEDIUMP vec2 uCloudXY; // the pattern's drift + this pass's shift (world px)
+uniform float uCloudK;   // 1 / the pattern's size in world px
+uniform float uStars;    // night sky: stars twinkling in the water (0 = none)
 uniform LOVE_HIGHP_OR_MEDIUMP vec3 uSlot; // atlas: first slot row (px), slot height, feet row
 
 const vec3 LUM = vec3(0.299, 0.587, 0.114);
@@ -199,6 +204,12 @@ vec4 effect(vec4 color, Image unused, vec2 tc, vec2 sc) {
   vec4 L = Texel(uLight, (vWorld - uLightRect.xy) / uLightRect.zw);
   vec3 light = mix(uShadow, vec3(1.0), L.r) * L.g;
   c.rgb *= mix(vec3(1.0), light, top);
+  // clouds drifting over: their shadows slide across the ground, the walls
+  // and the people alike
+  if (uCloudOn > 0.0) {
+    float cl = Texel(uCloud, (vWorld + uCloudXY) * uCloudK).r;
+    c.rgb *= 1.0 - uCloudOn * cl;
+  }
   float alphaMul = mix(color.a, 1.0, max(max(uLit, uTerrain), blinkFlag));
   float f = clamp((vDepth - uFogRange.x) / max(1.0, uFogRange.y - uFogRange.x), 0.0, 1.0);
   vec2 e = min(uv, vec2(1.0) - uv) * uSize;
@@ -247,6 +258,18 @@ vec4 effect(vec4 color, Image unused, vec2 tc, vec2 sc) {
   if (uReflOn > 0.0 && water > 0.5) {
     vec4 R = Texel(uRefl, (sc + wave * 2.5) / uScreen);
     lit = mix(lit, R.rgb, R.a * uReflOn);
+  }
+  // the night sky in the water: here and there a star, twinkling and
+  // trembling with the waves (the sky itself is mostly off the screen)
+  if (uStars > 0.0 && water > 0.5) {
+    vec2 g = floor(vWorld / 9.0);
+    float hs = fract(sin(dot(g, vec2(12.9898, 78.233))) * 43758.5453);
+    if (hs > 0.955) {
+      vec2 cpos = (g + 0.5 + (vec2(fract(hs * 13.1), fract(hs * 7.7)) - 0.5) * 0.6) * 9.0;
+      float d = length(vWorld + wave * 1.2 - cpos);
+      float tw = 0.35 + 0.65 * (0.5 + 0.5 * sin(uTime * (1.5 + hs * 2.0) + hs * 60.0));
+      lit += vec3(1.0, 0.97, 0.85) * (1.0 - smoothstep(0.25, 1.0, d)) * tw * uStars;
+    }
   }
   vec3 rgb = mix(lit, uFog.rgb, f);
   // dark cave: everything standing outside the Flash circle is black.
@@ -665,6 +688,92 @@ reflTargets = function(w, h)
   return c, d
 end
 
+-- Cloud shadows: soft blobs in a tiling 128x128 pattern (value noise, a
+-- few octaves, wrapped so it tiles), thresholded into separate clouds.
+local cloudImage
+local function cloudTexture()
+  if cloudImage then return cloudImage end
+  local N = 128
+  local function hash(x, y, p)
+    local h = (x * 374761393 + y * 668265263 + p * 1442695041) % 2147483647
+    h = (h * 1274126177) % 2147483647
+    return (h % 10000) / 10000
+  end
+  local function noise(x, y, period, p)
+    local x0, y0 = math.floor(x), math.floor(y)
+    local fx, fy = x - x0, y - y0
+    fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+    local function g(i, j) return hash((x0 + i) % period, (y0 + j) % period, p) end
+    local a = g(0, 0) + (g(1, 0) - g(0, 0)) * fx
+    local b = g(0, 1) + (g(1, 1) - g(0, 1)) * fx
+    return a + (b - a) * fy
+  end
+  local data = love.image.newImageData(N, N)
+  for y = 0, N - 1 do
+    for x = 0, N - 1 do
+      local v, amp, tot = 0, 1, 0
+      for o = 0, 3 do
+        local period = 4 * 2 ^ o
+        v = v + amp * noise(x / N * period, y / N * period, period, o + 1)
+        tot = tot + amp
+        amp = amp * 0.5
+      end
+      v = v / tot
+      local c = math.min(1, math.max(0, (v - 0.5) / 0.16))
+      c = c * c * (3 - 2 * c)
+      data:setPixel(x, y, c, c, c, 1)
+    end
+  end
+  cloudImage = love.graphics.newImage(data)
+  cloudImage:setFilter("linear", "linear")
+  cloudImage:setWrap("repeat", "repeat")
+  return cloudImage
+end
+Scene._cloudTexture = cloudTexture
+
+-- The sky behind the map: clouds drifting across it by day, stars at
+-- night.  Screen space, under everything (what stands in front hides it).
+local skyStars
+local function skyDecor(w, h, sky)
+  if not sky then return end
+  local band = h * 0.42 -- (the sky shows above the far edge of the map)
+  if (sky.stars or 0) > 0.01 then
+    if not skyStars then
+      skyStars = {}
+      local r = love.math.newRandomGenerator(7)
+      for i = 1, 90 do skyStars[i] = { r:random(), r:random() ^ 1.6, r:random() * 6.28, 0.6 + r:random() * 1.4 } end
+    end
+    local t = sky.time or 0
+    for _, st in ipairs(skyStars) do
+      local a = sky.stars * (0.45 + 0.55 * (0.5 + 0.5 * math.sin(t * 1.3 + st[3])))
+      love.graphics.setColor(1, 0.97, 0.88, a)
+      local sz = st[4] * math.max(1, h / 900)
+      love.graphics.rectangle("fill", st[1] * w, st[2] * band, sz, sz)
+    end
+  end
+  if (sky.clouds or 0) > 0.01 then
+    local img = puffTexture()
+    local t = sky.time or 0
+    local col = sky.color or { 1, 1, 1 }
+    local r = love.math.newRandomGenerator(11)
+    local unit = w / 6
+    for i = 1, 7 do
+      local speed = (sky.speed or 6) * (0.6 + r:random() * 0.8) * (w / 720)
+      local span = w + unit * 4
+      local x = ((r:random() * span + t * speed) % span) - unit * 2
+      local y = band * (0.12 + r:random() * 0.6)
+      local s = unit * (0.7 + r:random() * 0.7)
+      for k = 1, 5 do
+        local ox, oy = (r:random() - 0.5) * s * 1.4, (r:random() - 0.5) * s * 0.3
+        local ps = s * (0.45 + r:random() * 0.4)
+        love.graphics.setColor(col[1], col[2], col[3], sky.clouds * 0.75)
+        love.graphics.draw(img, x + ox - ps, y + oy - ps * 0.5, 0, ps * 2 / 16, ps / 16)
+      end
+    end
+  end
+  love.graphics.setColor(1, 1, 1, 1)
+end
+
 -- p = { target, cam (solved), view, proj, ground, groundX, groundY,
 --       atlas, overlay, skyTop, skyBottom, fog, fogStart, fogEnd }
 function Scene.render(p)
@@ -678,6 +787,7 @@ function Scene.render(p)
   love.graphics.setDepthMode("always", false)
   love.graphics.setColor(1, 1, 1, 1)
   skyGradient(w, h, p.skyTop, p.skyBottom)
+  skyDecor(w, h, p.sky)
 
   love.graphics.setShader(shader)
   send("uKRef", math.max(1, p.cam and p.cam.dist or 500))
@@ -697,6 +807,11 @@ function Scene.render(p)
   send("uLightRect", lit and lightRect or { 0, 0, 1, 1 })
   send("uShadow", p.shadowTint or { 0.58, 0.62, 0.76 })
   send("uLit", lit and 1 or 0)
+  local cloud = p.clouds
+  send("uCloud", cloud and cloudTexture() or white())
+  send("uCloudK", 1 / ((cloud and cloud.size) or 512))
+  send("uCloudOn", 0)
+  send("uStars", 0)
   local dk = p.dark
   send("uDark", dk and { dk[1], dk[2], dk[3], 1 } or { 0, 0, 0, 0 })
   send("uTint", p.tint or { 1, 1, 1 })
@@ -766,7 +881,14 @@ function Scene.render(p)
   send("uCutout", -1)
   send("uTerrain", 1)
   send("uWindV", p.wind or 0)
+  if cloud then
+    send("uCloudOn", cloud.strength or 0)
+    send("uCloudXY", { cloud.x + (p.shiftX or 0), cloud.y + (p.shiftY or 0) })
+  end
+  send("uStars", p.sky and p.sky.stars or 0)
   drawMesh("terrain")
+  send("uStars", 0)
+  send("uCloudOn", 0)
   send("uWindV", 0)
   send("uTerrain", 0)
   send("uShift", { 0, 0 })
@@ -812,7 +934,12 @@ function Scene.render(p)
       love.graphics.setColor(1, 1, 1, 1)
       love.graphics.setDepthMode("lequal", true)
     end
+    if cloud then
+      send("uCloudOn", cloud.strength or 0)
+      send("uCloudXY", { cloud.x, cloud.y })
+    end
     drawMesh("actors")
+    send("uCloudOn", 0)
     send("uActors", 0)
   end
 
