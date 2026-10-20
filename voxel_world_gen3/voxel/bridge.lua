@@ -42,6 +42,8 @@ local Bridge = {}
 local CELL = 16
 -- what a fully shadowed top is multiplied by: a cool, sky-lit shade
 local SHADOW_TINT = { 0.58, 0.62, 0.76 }
+-- indoors a room's shadows are its own colour dimmed, not sky-blue
+local ROOM_SHADOW = { 0.72, 0.68, 0.66 }
 -- slots are wide enough for the biggest field sprites (the S.S. Anne is
 -- drawn from its left end, so it needs 96px+ to the right of its anchor)
 local SLOT_W, SLOT_H, FOOT_X, FOOT_Y = 160, 96, 48, 80
@@ -626,6 +628,13 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
   -- ease toward the selected angle on real frame time, like Tilt does
   local dt = love.timer and love.timer.getDelta() or 1 / 60
   local goal = targetPitch()
+  -- indoors a flatter view (when tilted at all): a room's walls and the
+  -- fronts of its furniture face the camera more
+  if goal > 0 then
+    local MapP = Engine.get("src.core.game3.map")
+    local defP = MapP and MapP.currentDef and MapP.currentDef()
+    if defP and not isOutdoor(defP) then goal = math.min(65, goal + 10) end
+  end
   local step = 90 * math.min(dt, 0.1)
   if state.pitch < goal then state.pitch = math.min(goal, state.pitch + step)
   elseif state.pitch > goal then state.pitch = math.max(goal, state.pitch - step) end
@@ -633,12 +642,10 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
   -- Indoors the camera stays straight: a room is a box seen from its open
   -- south side, with nothing behind its walls to look at, and turned it only
   -- showed the cut-off ends of the side walls and the black around them.
+  -- (rooms used to keep the camera straight: turned, they showed the cut
+  -- ends of the walls and the black around them.  Their open sides are
+  -- walled now (heightfield.lua, the room pass), so they turn too.)
   local yGoal = (settings.level > 0) and (tonumber(settings.yaw) or 0) or 0
-  if yGoal ~= 0 then
-    local Map = Engine.get("src.core.game3.map")
-    local def = Map and Map.currentDef and Map.currentDef()
-    if def and not isOutdoor(def) then yGoal = 0 end
-  end
   local yaw = state.yaw or 0
   local yStep = math.max(0.4, math.abs(yGoal - yaw) * 0.12)
   if yaw < yGoal then yaw = math.min(yGoal, yaw + yStep)
@@ -928,10 +935,14 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
   if settings.sunShadows then
     local key = sunKeyFor(provider.def)
     local s = (key ~= "noon") and DayNight.sunOf(key) or nil
+    local indoor = not isOutdoor(provider.def)
     Lighting.bake(grid, HF.VOXEL, { tick = tick,
-      -- no sun at night (and none indoors): ambient occlusion only
-      sun = isOutdoor(provider.def) and key ~= "night",
-      sunX = s and s.sunX, sunY = s and s.sunY })
+      -- no sun at night: ambient occlusion only.  Indoors the room's own
+      -- light, high up toward the back wall: furniture throws a soft
+      -- shadow forward onto the floor, the back wall a band along its foot.
+      sun = indoor or key ~= "night",
+      sunX = indoor and 0.1 or (s and s.sunX), sunY = indoor and 0.38 or (s and s.sunY),
+      room = indoor and grid.room ~= nil })
     state.bakedSunKey = key
     local okL, img = pcall(function()
       local d = Lighting.imageData(grid, tick)
@@ -1316,7 +1327,7 @@ function Bridge.renderPending(R)
     fogStart = cam.dist * 1.25, fogEnd = cam.dist * 2.8,
     shadows = settings.shadows,
     xray = settings.xray,
-    light = settings.sunShadows, shadowTint = SHADOW_TINT,
+    light = settings.sunShadows, shadowTint = (isOutdoor(provider.def) and SHADOW_TINT) or ROOM_SHADOW,
     tint = tint,
     desat = (dayNight(provider.def) or {}).desat,
     night = settings.nightlights ~= false and Bridge.nightLevel(dayNight(provider.def)) or 0,
@@ -1601,6 +1612,10 @@ function Bridge.install()
           end
           if g and g.exitNote then
             text = text .. ("  exit %d (%s) void %d"):format(g.exitFloors or 0, g.exitNote, g.voidFlat or 0)
+          end
+          if g and g.room then
+            local r = g.room
+            text = text .. ("  room h%d d%d w%d s%d f%d e%d"):format(r.wallH, r.depth, r.walls, r.sides, r.things, r.edges or 0)
           end
           local wk = weatherKind(def)
           if wk then text = text .. "  wx " .. wk end

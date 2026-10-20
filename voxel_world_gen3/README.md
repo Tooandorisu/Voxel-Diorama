@@ -59,7 +59,7 @@ is painted shifted north by its own height. So a pixel of art at `(x, y)`
 belongs to the 3D point `(x, y + z, z)`. The mod runs that backwards:
 
 1. **Heights from collision.** Each column of solid cells (buildings,
-   trees, fences, cliffs, signs, the indoor walls) is a *run*. A run of 1
+   trees, fences, cliffs, signs) is a *run*. A run of 1
    cell is an 8px slab, a run of 2 is one storey (16px), and 3 or more is
    two storeys (32px). Doors and cave mouths count as part of the facade
    they're cut into. Water sits 2px low. Ledges are a 4px lip. Tall grass
@@ -69,9 +69,15 @@ belongs to the 3D point `(x, y + z, z)`. The mod runs that backwards:
    Every voxel samples the art at `(x, y - z)`. So a house's front wall,
    door and windows stand upright, its roof sits on top, and a fence stays
    thin.
-3. **FRLG trees.** The walkable canopy cell above a trunk is the top of the
+3. **Interiors.** A room is built as a dollhouse: the solid band under the
+   black void at the top is the back wall, one height across the room;
+   solid cells beside the void are side walls as tall; everything else is
+   furniture, a box as tall as its art reaches above its cell (read from
+   where the wall or floor pattern behind it repeats again). The floor is
+   flat.
+4. **FRLG trees.** The walkable canopy cell above a trunk is the top of the
    same tree, so the tree stands on its trunk with its crown on top.
-4. **Characters.** These are camera-facing billboards. Their depth comes
+5. **Characters.** These are camera-facing billboards. Their depth comes
    from an upright plane through their feet, so a character is never
    clipped by a tree or wall behind it. They're still hidden by anything in
    front, and they disappear into doorways like on the cart.

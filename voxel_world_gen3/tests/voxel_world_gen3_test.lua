@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.21.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.22.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -647,6 +647,62 @@ do
 end
 
 do
+  -- indoors, a room as a dollhouse: one back-wall height across the room
+  -- (a cabinet's cell does not raise its column), side walls as tall,
+  -- furniture as tall as its art reaches above its cell, the floor flat
+  local rows = { "##########", "##########", "##########", "#.##.#...#", "#........#", "#.....##.#", "#.....##.#", "##########" }
+  local cell = mapProvider(rows, L).cell
+  local function color(wx, wy)
+    local cx, cy = math.floor(wx / 16), math.floor(wy / 16)
+    if cy < 0 or cy > 7 or cx < 0 or cx > 9 then return nil end
+    -- cabinet (2..3, 3), its art from 12 px up in the wall row
+    if (cx == 2 or cx == 3) and wy >= 2 * 16 + 4 and wy < 3 * 16 + 14 then return 0.85, 0.5, 0.25 end
+    -- a pot (5, 3), 4 px up
+    if cx == 5 and wy >= 2 * 16 + 12 and wy < 3 * 16 + 12 then return 0.55, 0.35, 0.15 end
+    -- a table (6..7, 5..6)
+    if (cx == 6 or cx == 7) and (cy == 5 or cy == 6) then return 0.75, 0.7, 0.3 end
+    if cy == 0 or cy == 7 then return 0, 0, 0 end
+    if cx == 0 or cx == 9 then return 0.7, 0.55, 0.3 end
+    if cy == 1 or cy == 2 then
+      if wy % 16 == 6 then return 0.95, 0.95, 0.95 end
+      return 0.78, 0.66, 0.35
+    end
+    return (wx % 2 == 0) and 0.55 or 0.62, 0.8, 0.4
+  end
+  -- walkable floor under the furniture rows (a door-less room)
+  local L3 = {}
+  for k, v in pairs(L) do L3[k] = v end
+  local g = HF.build({ cell = cell, color = color }, 0, 0, 10, 8, { lumps = false, indoor = true })
+  local function h(cx, cy) return g.H[(cy * 4 + 1) * g.vcols + cx * 4 + 1 + 1] end
+  local wallH = g.room and g.room.wallH
+  T.eq(wallH, 48, "a two-row back wall stands 48 px: its art and a plain storey above")
+  T.eq(g.CAP[(1 * 4 + 1) * g.vcols + 4 * 4 + 1 + 1], 16, "the top 16 px hold the art's top row")
+  local even = true
+  for cx = 1, 8 do if h(cx, 1) ~= wallH or h(cx, 2) ~= wallH then even = false end end
+  T.check(even, "the back wall is one height all along (cabinet columns too)")
+  T.eq(h(0, 4), wallH, "the side wall is as tall as the back wall")
+  local cab, pot, tab = h(2, 3), h(5, 3), h(6, 5)
+  T.check(cab > pot and cab >= 20 and cab < wallH, "the cabinet stands tall against the wall (" .. tostring(cab) .. ")")
+  T.check(pot >= 12 and pot <= 20, "a pot is knee-high (" .. tostring(pot) .. ")")
+  T.check(tab >= 8 and tab <= 12, "a table is low (" .. tostring(tab) .. ")")
+  T.eq(h(3, 4), 0, "the floor is flat")
+  -- the same room with no side walls on the map: its floor runs to the
+  -- black.  A thin wall stands in the void along each edge, as tall as the
+  -- back wall, showing the back wall's art (read from a column of it)
+  local g2 = HF.build({ cell = cell, color = function(wx, wy)
+    local cx, cy = math.floor(wx / 16), math.floor(wy / 16)
+    if (cx == 0 or cx == 9) and cy >= 3 then return 0, 0, 0 end
+    return color(wx, wy)
+  end }, 0, 0, 10, 8, { lumps = false, indoor = true })
+  local inner = (4 * 4 + 1) * g2.vcols + 0 * 4 + 3 + 1 -- (0, 4)'s east voxel
+  local outer = (4 * 4 + 1) * g2.vcols + 0 * 4 + 0 + 1
+  T.check(g2.room and g2.room.edges > 0, "open room edges are walled")
+  T.eq(g2.H[inner], g2.room.wallH, "the edge wall is as tall as the back wall")
+  T.eq(g2.H[outer], 0, "and one voxel thin")
+  T.check(g2.U[inner] ~= nil and g2.K[inner] == 0, "it reads the back wall's art")
+end
+
+do
   -- indoors, a one-cell wall beside the void stays a whole, full wall
   local rows = { "#....#", "#....#", "#....#", "#....#", "......" }
   local cell = mapProvider(rows, L).cell
@@ -656,7 +712,7 @@ do
     return 0.9, 0.75, 0.45 end }
   local g = HF.build(provider, 0, 0, 6, 5, { lumps = false, indoor = true })
   local tall = true
-  for vx = 0, 3 do if g.H[(3 * 4 + 2) * g.vcols + vx + 1] ~= 32 then tall = false end end
+  for vx = 0, 3 do if g.H[(3 * 4 + 2) * g.vcols + vx + 1] ~= 48 then tall = false end end
   T.check(tall, "an indoor side wall is not cut out or shrunk")
 end
 

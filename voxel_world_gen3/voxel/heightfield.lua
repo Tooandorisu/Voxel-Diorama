@@ -111,6 +111,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     lights = {},
     B = {}, -- buildings (under a roof): only their walls have lit windows
     SW = {}, -- foliage that sways in the wind (trees, canopies, tall grass)
+    -- indoors (the room pass): U shifts where a voxel's art is read from
+    -- sideways (px), CAP is how much of a wall's top shows its art's top
+    -- row held, instead of the art running on (a wall taller than its art)
+    U = {}, CAP = {},
   }
   local H, S, K, C, L, W, R = grid.H, grid.S, grid.K, grid.C, grid.L, grid.W, grid.R
   local F = grid.F
@@ -1602,6 +1606,8 @@ function HF.build(provider, x0, y0, cols, rows, opts)
                 local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
                 H[k], S[k], K[k], C[k], L[k] = 0, 0, 1, 0, 1
                 W[k], R[k], F[k] = nil, nil, nil
+                grid.V = grid.V or {}
+                grid.V[k] = true -- (the room's light falls off toward it)
               end
             end
             grid.voidFlat = grid.voidFlat + 1
@@ -1609,6 +1615,342 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         end
       end
     end
+  end
+
+  -- Indoors, the room.  The outdoor rules (runs of solid cells, one or two
+  -- storeys by depth) made a room's back wall a short strip whose pieces
+  -- stood at different heights wherever a cabinet's cell joined its run,
+  -- left the side walls as low edges and laid the furniture nearly flat.
+  -- A room is built as a dollhouse instead:
+  --   back wall   the solid band under the black void at the top of each
+  --               column, all of it one height, its art upright
+  --   side walls  solid cells beside the void on the left or right, as
+  --               tall as the back wall
+  --   furniture   every other solid cell, a box as tall as its art reaches
+  --               above its cell (read from the art: where the wall or
+  --               floor pattern behind it starts again)
+  --   floor       flat
+  grid.room = nil
+  if opts.indoor and not opts.cave and color then
+    local function isVoid(cx, cy)
+      -- (past the cells built: nothing to stand beside)
+      if cx < x0 or cx > x0 + cols - 1 or cy < y0 or cy > y0 + rows - 1 then return true end
+      local c = at(cx, cy)
+      if not c then return true end
+      if c.border then return true end
+      if c.kind ~= "solid" or c.tree then return false end
+      local st = cellStats(cx, cy)
+      return st ~= nil and luminance(st.r, st.g, st.b) < 0.06 and st.sd < 0.04
+    end
+    local function solidThing(cx, cy)
+      local c = at(cx, cy)
+      -- (kindOf: an impassable cell of the very floor tile beside it is floor)
+      return c ~= nil and c.kind == "solid" and not c.tree and kindOf(cx, cy) == "solid" and not isVoid(cx, cy)
+    end
+    local X1, Y1r = x0 + cols - 1, y0 + rows - 1
+    -- back wall: per column, the first solid band under the void
+    local band = {}
+    for cx = x0, X1 do
+      for cy = y0, Y1r do
+        if solidThing(cx, cy) and isVoid(cx, cy - 1) then
+          local e = cy
+          while e + 1 <= Y1r and solidThing(cx, e + 1) do e = e + 1 end
+          band[cx] = { top = cy, raw = e }
+          break
+        elseif not isVoid(cx, cy) then
+          break -- floor first: no back wall in this column (in view)
+        end
+      end
+    end
+    -- the band's bottom: stretches of three or more columns ending on the
+    -- same row are wall; a column or two reaching further down is a cabinet
+    -- or a shelf standing against it, cut back to the wall beside it
+    local ends = {}
+    do
+      local cx = x0
+      while cx <= X1 do
+        local b = band[cx]
+        if not b then
+          cx = cx + 1
+        else
+          local e = cx
+          while e + 1 <= X1 and band[e + 1] and band[e + 1].raw == b.raw do e = e + 1 end
+          if e - cx + 1 >= 3 then
+            for x = cx, e do ends[x] = b.raw end
+          end
+          cx = e + 1
+        end
+      end
+      for cx = x0, X1 do
+        local b = band[cx]
+        if b and not ends[cx] then
+          -- nearest wide stretch, else the shallowest band near it
+          local best, bd
+          for d = 1, cols do
+            for _, x in ipairs({ cx - d, cx + d }) do
+              if ends[x] and band[x] and band[x].top == b.top and (not bd or d < bd) then best, bd = ends[x], d end
+            end
+            if best then break end
+          end
+          ends[cx] = math.min(b.raw, best or b.raw)
+          if not best and b.raw - b.top + 1 > 3 then
+            -- a lone deep column from the top: a side wall, not a back wall
+            band[cx], ends[cx] = nil, nil
+          elseif not best then
+            for d = 1, 2 do
+              for _, x in ipairs({ cx - d, cx + d }) do
+                local o = band[x]
+                if o and o.top == b.top and o.raw < ends[cx] then ends[cx] = o.raw end
+              end
+            end
+          end
+        end
+      end
+    end
+    -- one height for the whole room: its usual band, upright
+    local depthCount, depth, nd = {}, 2, 0
+    for cx, b in pairs(band) do
+      local d = ends[cx] - b.top + 1
+      depthCount[d] = (depthCount[d] or 0) + 1
+      if depthCount[d] > nd then depth, nd = d, depthCount[d] end
+    end
+    -- (a storey above its art: the room reads as a box you look into, the
+    -- extra height its art's top row held -- see CAP)
+    local artH = math.max(32, math.min(48, depth * CELL))
+    local wallH = snap((artH + 16) * scale)
+    local role = {} -- [key] = "wall" | "side" | "thing"
+    local function key(cx, cy) return cy * 65536 + cx end
+    -- (no deeper than the room's usual wall: a stretch reaching further
+    -- down -- the alcove behind a Poke Center's counter -- stood as one
+    -- wall-high block cells deep, its top the art's top row smeared over
+    -- them; what lies in front of the usual wall is furniture against it)
+    for cx, b in pairs(band) do
+      if ends[cx] > b.top + depth - 1 then ends[cx] = b.top + depth - 1 end
+      for cy = b.top, ends[cx] do role[key(cx, cy)] = "wall" end
+    end
+    for cy = y0, Y1r do
+      for cx = x0, X1 do
+        if solidThing(cx, cy) and not role[key(cx, cy)] then
+          role[key(cx, cy)] = (isVoid(cx - 1, cy) or isVoid(cx + 1, cy)) and "side" or "thing"
+        end
+      end
+    end
+    -- a box h tall over cells cy0..cy1 whose art starts at artTop; with
+    -- art shorter than the box (show), its top `h - show` px hold the art's
+    -- top row
+    -- (a side wall runs along the room: one or two cells beside the void
+    -- are a cupboard or a plant in the corner)
+    for cx = x0, X1 do
+      local cy = y0
+      while cy <= Y1r do
+        if role[key(cx, cy)] == "side" then
+          local e = cy
+          while e + 1 <= Y1r and role[key(cx, e + 1)] == "side" do e = e + 1 end
+          if e - cy + 1 < 3 then
+            for y = cy, e do role[key(cx, y)] = "thing" end
+          end
+          cy = e + 1
+        else
+          cy = cy + 1
+        end
+      end
+    end
+    local function box(cx, cy0, cy1, h, artTop, show)
+      show = show or h
+      local Y0, Y1 = cy0 * CELL, (cy1 + 1) * CELL
+      local kk = max(Y1 - show - artTop, VOXEL) / (Y1 - Y0)
+      local cc = (Y1 - show) - kk * Y1
+      local cap = h - show
+      for cy = max(cy0, y0), min(cy1, Y1r) do
+        for j = 0, PER - 1 do
+          for i = 0, PER - 1 do
+            local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
+            H[k], S[k], K[k], C[k], L[k] = h, h, kk, cc, 1
+            grid.CAP[k] = cap > 0 and cap or nil
+            W[k], R[k], F[k], grid.SW[k], grid.B[k] = nil, nil, nil, nil, nil
+          end
+        end
+      end
+    end
+    -- how far a thing's art reaches up past its cell into the cell above:
+    -- pixel rows that differ from the same rows beside it (the wall or the
+    -- floor behind repeats from cell to cell; the thing does not)
+    local function rowDiff(ax, bx, wy)
+      local d = 0
+      for i = 0, CELL - 1, 2 do
+        local r1, g1, b1 = color(ax * CELL + i, wy)
+        local r2, g2, b2 = color(bx * CELL + i, wy)
+        if not (r1 and r2) then return nil end
+        d = d + math.abs(r1 - r2) + math.abs(g1 - g2) + math.abs(b1 - b2)
+      end
+      return d / (CELL / 2)
+    end
+    local function reach(cx, cy, limit, behind)
+      -- reference columns: the nearest cells either side of the same kind
+      -- behind (wall or floor) with no thing in front of them
+      local refs = {}
+      for d = 1, 4 do
+        for _, x in ipairs({ cx - d, cx + d }) do
+          if #refs < 2 and behind(x, cy - 1) and not (role[key(x, cy)] == "thing") then refs[#refs + 1] = x end
+        end
+      end
+      if #refs == 0 then return 0 end
+      local up = 0
+      for dy = 1, limit do
+        local wy = cy * CELL - dy
+        local same = false
+        for _, x in ipairs(refs) do
+          local df = rowDiff(cx, x, wy)
+          if df == nil or df < 0.12 then same = true break end
+        end
+        if same then
+          -- (a row or two matching by chance inside the thing: look on)
+          local nxt = false
+          for dy2 = dy + 1, math.min(limit, dy + 2) do
+            local wy2 = cy * CELL - dy2
+            local all = true
+            for _, x in ipairs(refs) do
+              local df = rowDiff(cx, x, wy2)
+              if df == nil or df < 0.12 then all = false break end
+            end
+            if all then nxt = true break end
+          end
+          if not nxt then break end
+        end
+        up = dy
+      end
+      return up
+    end
+    local walls, sides, things = 0, 0, 0
+    for cx = x0, X1 do
+      local cy = y0
+      while cy <= Y1r do
+        local r = role[key(cx, cy)]
+        if r then
+          local e = cy
+          while e + 1 <= Y1r and role[key(cx, e + 1)] == r do e = e + 1 end
+          if r == "wall" then
+            local show = snap(math.min(artH, (e - cy + 1) * CELL) * scale)
+            -- (its top reads the dark above the wall's art: a dollhouse's
+            -- walls are cut through, and a sliver of art smeared over the
+            -- top showed as streaks, or as a pale block on an alcove)
+            box(cx, cy, e, wallH, (e + 1) * CELL - show - 12, show)
+            walls = walls + 1
+          elseif r == "side" then
+            box(cx, cy, e, wallH, cy * CELL)
+            sides = sides + 1
+          else
+            local n = e - cy + 1
+            local against = role[key(cx, cy - 1)] == "wall" or role[key(cx, cy - 1)] == "side"
+            local up
+            if against then
+              up = reach(cx, cy, depth * CELL, function(x, y) return role[key(x, y)] == "wall" end)
+            else
+              up = reach(cx, cy, CELL, function(x, y) return walkable(at(x, y)) end)
+            end
+            -- a box as tall as the art standing up from its front edge:
+            -- the thing's own cell row and what reaches above it, less
+            -- what lies on its top (a deep table shows most of it there)
+            local h
+            if against then
+              h = math.min(wallH - VOXEL, math.max(12, up + (n == 1 and 12 or 8)))
+            else
+              -- (free-standing: the floor around it is no reliable
+              -- reference -- tatami mats lie both ways, a cushion beside a
+              -- table differs -- so what reaches above counts for little:
+              -- a counter a cell deep stands up to 20, a table stays low)
+              if n == 1 then
+                h = 12 + math.min(up, 8)
+              else
+                h = 8 + math.min(up, 4)
+              end
+            end
+            h = snap(h * scale)
+            if against and up >= depth * CELL - 2 then
+              -- its picture fills the wall above it to the top: part of the
+              -- wall stepping forward (an alcove, a built-in cupboard), as
+              -- tall as the wall and held at the top the same way -- as a
+              -- box a few px short of it, its top showed as a pale block
+              local show = math.min(wallH, up + n * CELL)
+              box(cx, cy, e, wallH, (e + 1) * CELL - show - 12, show)
+              walls = walls + 1
+            else
+              box(cx, cy, e, h, cy * CELL - up)
+              things = things + 1
+            end
+          end
+          cy = e + 1
+        else
+          cy = cy + 1
+        end
+      end
+    end
+    -- the floor lies flat
+    for cy = y0, Y1r do
+      for cx = x0, X1 do
+        local c = at(cx, cy)
+        if c and (c.kind == "ground" or c.kind == "door") and not role[key(cx, cy)] then
+          for j = 0, PER - 1 do
+            for i = 0, PER - 1 do
+              local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
+              if (H[k] or 0) > 0 and (S[k] or 0) < 16 then
+                H[k], S[k], K[k], C[k], L[k] = 0, 0, 1, 0, 1
+                W[k], R[k], F[k] = nil, nil, nil
+              end
+            end
+          end
+        end
+      end
+    end
+    -- The open sides.  Most rooms have no side walls on the map: the floor
+    -- runs to the black.  Turned, or lit, the room showed its floor's raw
+    -- edge over the void.  A thin wall (one voxel) stands in the void along
+    -- each such edge, as tall as the back wall, and shows the back wall's
+    -- art -- its bands and trim running on around the corner (U reads a
+    -- plain column of it, one cell in from the room's end).
+    local made = 0
+    local plainL, plainR, wallTop = nil, nil, nil
+    for cx = x0, X1 do
+      local b = band[cx]
+      if b and ends[cx] then
+        wallTop = wallTop or ends[cx]
+        if not plainL then plainL = cx end
+        plainR = cx
+      end
+    end
+    if plainL then
+      -- (a cell in from each end: the end column is often a pillar)
+      if plainR - plainL >= 2 then plainL, plainR = plainL + 1, plainR - 1 end
+      local A1 = (wallTop + 1) * CELL
+      local show = snap(artH * scale)
+      local cap = wallH - show
+      for cy = wallTop + 1, Y1r do
+        for cx = x0, X1 do
+          local cc0 = at(cx, cy)
+          local inside = not isVoid(cx, cy) and role[key(cx, cy)] ~= "side" and role[key(cx, cy)] ~= "wall"
+            and not (cc0 and cc0.kind == "door")
+          if inside then
+            for _, sd in ipairs({ -1, 1 }) do
+              local nx = cx + sd
+              if nx >= x0 and nx <= X1 and isVoid(nx, cy) then
+                local vx = (nx - x0) * PER + (sd < 0 and PER - 1 or 0)
+                local srcX = (sd < 0 and plainL or plainR) * CELL + CELL / 2
+                for j = 0, PER - 1 do
+                  local k = vindex(vx, (cy - y0) * PER + j)
+                  local wx = grid.px + vx * VOXEL + VOXEL / 2
+                  H[k], S[k], K[k], C[k], L[k] = wallH, wallH, 0, A1 - show, 1
+                  grid.U[k] = srcX - wx
+                  grid.CAP[k] = cap > 0 and cap or nil
+                  W[k], R[k], F[k] = nil, nil, nil
+                end
+                made = made + 1
+              end
+            end
+          end
+        end
+      end
+    end
+    grid.room = { wallH = wallH, depth = depth, walls = walls, sides = sides, things = things, edges = made }
   end
 
   grid.exitFloors = 0
