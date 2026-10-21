@@ -84,6 +84,7 @@ local settings = {
   smoke = true, -- chimneys on houses, smoke rising from them
   footprints = true, -- prints in sand and ash, wet prints out of puddles
   clouds = true, -- cloud shadows drifting over the ground, clouds and stars in the sky
+  waves = true, -- foam along shores, waves rolling in, a wake behind swimmers
   yaw = 0, -- camera turn in degrees (+ = swing east / RIGHT, - = west / LEFT)
   fov = 30,
 }
@@ -1147,6 +1148,7 @@ function Bridge.renderPending(R)
       if not c then return nil end
       local n = c.beh ~= nil and ids[c.beh]
       if n == "PUDDLE" or n == "SHALLOW_WATER" then return "wet" end
+      if c.kind == "water" then return settings.waves ~= false and "water" or nil end
       if n == "SAND" or n == "DEEP_SAND" or n == "FOOTPRINTS" then return "sand" end
       if c.kind == "ground" and not c.canopy then return "open" end
       if c.kind == "door" or c.kind == "ledge" then return "open" end
@@ -1338,6 +1340,7 @@ function Bridge.renderPending(R)
   end
   local okR = Scene.render({
     clouds = clouds, sky = sky,
+    foam = settings.waves ~= false and state.grid ~= nil and state.grid.hasWater == true,
     target = target, cam = cam,
     view = Camera.view(cam), proj = Camera.projection(cam, true),
     shiftX = state.shiftX, shiftY = state.shiftY,
@@ -1612,7 +1615,9 @@ function Bridge.install()
             local cs = Critters._state
             text = text .. ("  crit %d/%d f%d"):format(#cs.flies, #cs.birds, cs.flocks or 0)
             local fs = Footprints._state
-            text = text .. ("  prints %d +%d w%d mv%d fx%d"):format(#fs.prints, fs.rate or 0, #fs.walkers, state.printMv or 0, state.printFx or 0)
+            local nwk = 0
+            for _, pr in ipairs(fs.prints) do if pr.kind == "wake" then nwk = nwk + 1 end end
+            text = text .. ("  prints %d +%d w%d mv%d fx%d wk%d"):format(#fs.prints, fs.rate or 0, #fs.walkers, state.printMv or 0, state.printFx or 0, nwk)
             local tp = fs.top
             if tp and tp.path > 0 then
               local who = type(tp.id) == "table" and ("o" .. tostring(tp.id.localId or tp.id.virtualId or "?")) or tostring(tp.id)

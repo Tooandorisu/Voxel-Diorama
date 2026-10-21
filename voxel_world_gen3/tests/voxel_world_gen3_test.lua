@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.23.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.24.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1142,6 +1142,22 @@ do
   end
   T.check(straight, "tire marks run in one line, not left and right")
   FP.reset()
+  -- surfing: a wake, a ripple every 5 px either side, gone in a moment
+  local sw = { id = "player", x = 0, y = 50, moving = true }
+  for _ = 1, 40 do sw.x = sw.x + 1; FP.update(1 / 60, "R", { sw }, ground("water"), 1, false) end
+  local nw = #FP._state.prints
+  T.check(nw >= 6 and nw <= 9, "a swimmer leaves a wake (" .. nw .. ")")
+  T.eq(FP._state.prints[1].kind, "wake", "of foam")
+  for _ = 1, 120 do FP.update(1 / 60, "R", { sw }, ground("water"), 1, false) end
+  T.eq(#FP._state.prints, 0, "which fades within two seconds")
+  FP.reset()
+  -- shores: water voxels know how far out they are (0 at the edge)
+  local gw = HF.build(mapProvider({ "....", "~~~~", "~~~~", "~~~~" }, L), 0, 0, 4, 4, { lumps = false })
+  local edge = gw.shore[(1 * 4 + 0) * gw.vcols + 5 + 1]
+  local out = gw.shore[(3 * 4 + 3) * gw.vcols + 5 + 1]
+  T.check(edge and edge <= 0.25, "water at the shore is near it (" .. tostring(edge) .. ")")
+  T.check(out == nil or out == 1, "water far out is open sea")
+  T.eq(gw.shore[1], 0, "land reads as the shore")
 end
 
 do
