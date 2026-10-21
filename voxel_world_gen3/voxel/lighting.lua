@@ -261,13 +261,16 @@ function Lighting.imageData(grid, tick)
   local w, h = grid.vcols, grid.vrows
   local data = love.image.newImageData(w, h)
   local SUN, AO, GLOW = grid.sun, grid.ao, grid.glow
+  local SH = grid.shore
   for y = 0, h - 1 do
     if y % 16 == 0 then tick() end
     local row = y * w
     for x = 0, w - 1 do
       local k = row + x + 1
       -- blue: 1 - night light (so a missing bake, all white, is unlit)
-      data:setPixel(x, y, SUN[k], AO[k], 1 - (GLOW and GLOW[k] or 0), 1)
+      -- alpha: the shore (heightfield.lua: 0 on land and at the water's
+      -- edge, 1 out at sea) -- the foam and the waves (scene.lua)
+      data:setPixel(x, y, SUN[k], AO[k], 1 - (GLOW and GLOW[k] or 0), SH and (SH[k] or 1) or 1)
     end
   end
   return data

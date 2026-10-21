@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.24.0
+
+- Waves & shorelines:
+  - Foam along the water's edge, wherever the sea, a lake or a river meets
+    sand, grass, rock or a pier, gently breathing.
+  - Every few seconds a wave rolls in: a line of foam that runs up to the
+    shore and fades, the timing varying along the coast.
+  - Surfing (and anyone swimming) leaves a wake: ripples of foam either
+    side of the path, spreading out as they fade.
+  The foam is lit by the hour -- by night a pale grey, still lighter than
+  the dark water around it -- and needs SUN SHADOWS on (it
+  rides the same light bake); the wake comes with FOOTPRINTS.
+- New option WAVES & FOAM (on by default).
+
 ## 1.23.0
 
 - Clouds & stars.  Outdoors under an open sky:

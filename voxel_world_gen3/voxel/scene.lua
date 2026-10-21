@@ -121,6 +121,7 @@ uniform float uCloudOn;  // how dark a cloud's shadow is (0 = none)
 uniform LOVE_HIGHP_OR_MEDIUMP vec2 uCloudXY; // the pattern's drift + this pass's shift (world px)
 uniform float uCloudK;   // 1 / the pattern's size in world px
 uniform float uStars;    // night sky: stars twinkling in the water (0 = none)
+uniform float uFoam;     // shore foam and waves (0 = off)
 uniform LOVE_HIGHP_OR_MEDIUMP vec3 uSlot; // atlas: first slot row (px), slot height, feet row
 
 const vec3 LUM = vec3(0.299, 0.587, 0.114);
@@ -258,6 +259,26 @@ vec4 effect(vec4 color, Image unused, vec2 tc, vec2 sc) {
   if (uReflOn > 0.0 && water > 0.5) {
     vec4 R = Texel(uRefl, (sc + wave * 2.5) / uScreen);
     lit = mix(lit, R.rgb, R.a * uReflOn);
+  }
+  // the shore: foam along the water's edge, and every few seconds a wave
+  // rolling in, a line of foam that runs up to the beach and fades
+  // (the light bake's alpha: 0 at the edge, 1 out at sea)
+  if (uFoam > 0.0 && water > 0.5) {
+    float sh = 1.0 - L.a;
+    if (sh > 0.0) {
+      float n = sin(vWorld.x * 0.13 + vWorld.y * 0.05) + 0.6 * sin(vWorld.x * 0.041 - vWorld.y * 0.09);
+      float ph = fract(uTime * 0.2 + n * 0.12);
+      float line = (1.0 - smoothstep(0.0, 0.15, abs(sh - ph))) * smoothstep(0.05, 0.45, ph);
+      float edge = smoothstep(0.5, 0.9, sh) * (0.8 + 0.2 * sin(uTime * 1.1 + n * 3.0));
+      float bub = fract(sin(dot(floor((vWorld + wave * 1.5) / 2.0), vec2(12.9898, 78.233))) * 43758.5453);
+      // (white enough to read on a phone: at half strength it passed for
+      // the art's own pale shallows)
+      float foam = max(edge, line * 0.9) * mix(0.65, 1.0, step(0.3, bub));
+      // (by night lighter than the dark water, not the day's white dimmed
+      // to the very colour of the water)
+      vec3 foamCol = max(vec3(0.97, 0.99, 1.0) * uTint, lit * 1.7 + vec3(0.1));
+      lit = mix(lit, foamCol, clamp(foam, 0.0, 1.0) * 0.92 * uFoam);
+    }
   }
   // the night sky in the water: here and there a star, twinkling and
   // trembling with the waves (the sky itself is mostly off the screen)
@@ -611,8 +632,9 @@ function Scene.setWeather(verts, nv, idx, ni)
   fill("weather", verts, nv, idx, ni)
 end
 
-function Scene.setPrints(v, n, idx, ni)
+function Scene.setPrints(v, n, idx, ni, wv, wn, widx, wni)
   fill("prints", v, n or 0, idx, ni)
+  fill("wakes", wv or {}, wn or 0, widx or {}, wni or 0)
 end
 
 function Scene.setSmoke(cv, cn, ci, cni, pv, pn, pi, pni)
@@ -812,6 +834,7 @@ function Scene.render(p)
   send("uCloudK", 1 / ((cloud and cloud.size) or 512))
   send("uCloudOn", 0)
   send("uStars", 0)
+  send("uFoam", 0)
   local dk = p.dark
   send("uDark", dk and { dk[1], dk[2], dk[3], 1 } or { 0, 0, 0, 0 })
   send("uTint", p.tint or { 1, 1, 1 })
@@ -886,7 +909,9 @@ function Scene.render(p)
     send("uCloudXY", { cloud.x + (p.shiftX or 0), cloud.y + (p.shiftY or 0) })
   end
   send("uStars", p.sky and p.sky.stars or 0)
+  send("uFoam", (lit and p.foam) and 1 or 0)
   drawMesh("terrain")
+  send("uFoam", 0)
   send("uStars", 0)
   send("uCloudOn", 0)
   send("uWindV", 0)
@@ -904,6 +929,23 @@ function Scene.render(p)
     send("uSize", { 8, 8 })
     send("uCutout", 0.01)
     drawMesh("prints")
+  end
+  -- the wake behind a swimmer: foam, lit (at night the day's tint made it
+  -- the colour of the water around it)
+  -- (no depth test: on the phone it lost to the water's surface however
+  -- high it floated -- 98 ripples alive, none on screen.  It lies flat on
+  -- open water and fades within two seconds; the characters drawn after
+  -- it still stand in front)
+  if (meshes.wakes and meshes.wakes.count or 0) > 0 then
+    love.graphics.setDepthMode("always", false)
+    send("uTex", printTexture())
+    send("uOrigin", { 0, 0 })
+    send("uSize", { 8, 8 })
+    send("uCutout", 0.01)
+    local t = p.tint or { 1, 1, 1 }
+    send("uTint", { t[1] + (1 - t[1]) * 0.55, t[2] + (1 - t[2]) * 0.55, t[3] + (1 - t[3]) * 0.55 })
+    drawMesh("wakes")
+    send("uTint", t)
   end
   -- blob shadows: depth-tested, never written, so they cannot hide a sprite
   if p.shadows ~= false then

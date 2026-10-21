@@ -2004,6 +2004,29 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
   end
 
+  -- Shores: how far each water voxel lies from land (0 beside it, 1 four
+  -- voxels -- 16 px -- out or further), for the foam and the waves rolling
+  -- in (scene.lua, through the light bake's alpha).
+  if grid.hasWater then
+    local SH, q, qh = {}, {}, 1
+    local WATER = HF.WATER
+    for k = 1, vcols * vrows do
+      if H[k] ~= WATER then SH[k] = 0; q[#q + 1] = k end
+    end
+    while qh <= #q do
+      local k = q[qh]; qh = qh + 1
+      local d = SH[k] + 0.25
+      if d <= 1 then
+        local vx = (k - 1) % vcols
+        if vx > 0 and SH[k - 1] == nil then SH[k - 1] = d; q[#q + 1] = k - 1 end
+        if vx < vcols - 1 and SH[k + 1] == nil then SH[k + 1] = d; q[#q + 1] = k + 1 end
+        if k > vcols and SH[k - vcols] == nil then SH[k - vcols] = d; q[#q + 1] = k - vcols end
+        if k + vcols <= vcols * vrows and SH[k + vcols] == nil then SH[k + vcols] = d; q[#q + 1] = k + vcols end
+      end
+    end
+    grid.shore = SH
+  end
+
   return grid
 end
 

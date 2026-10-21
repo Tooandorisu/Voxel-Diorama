@@ -21,11 +21,12 @@ local floor, sqrt, min, max, abs = math.floor, math.sqrt, math.min, math.max, ma
 local state = { prints = {}, walkers = {}, map = nil, t = 0 }
 Footprints._state = state
 
-local LIFE = { sand = 14, ash = 18, wet = 3.5 }
+local LIFE = { sand = 14, ash = 18, wet = 3.5, wake = 1.6 }
 local COL = {
   sand = { 0.38, 0.26, 0.15, 0.65 },
   ash = { 0.22, 0.22, 0.25, 0.72 },
   wet = { 0.16, 0.20, 0.30, 0.6 },
+  wake = { 1.0, 1.0, 1.0, 0.95 }, -- foam behind a swimmer
 }
 local MAXP = 360
 -- feet this far from their anchor have really moved: a quarter of a cell.
@@ -96,26 +97,31 @@ function Footprints.update(dt, map, actors, groundAt, player, ashMap)
         w.dist = w.dist + counted
         w.path = (w.path or 0) + counted
         local g = groundAt(a.x, a.y)
-        if g == "wet" then w.wet = 1.6 end
+        local swim = g == "water"
+        if g == "wet" or swim then w.wet = 1.6 end
         -- (and at most 16 prints a second, a fast bike's pace)
-        -- (on a bike: one tire track, a dash every 4 px, not a pair of feet)
-        local every = a.bike and 4 or 8
-        if w.dist >= every and state.t - (o.lastPrint or -1) >= (a.bike and 1 / 60 or MINGAP) then
+        -- (on a bike: one tire track, a dash every 4 px, not a pair of feet;
+        -- in the water the wake, a ripple every 5 px to either side)
+        local every = swim and 5 or (a.bike and 4 or 8)
+        if w.dist >= every and state.t - (o.lastPrint or -1) >= ((a.bike or swim) and 1 / 60 or MINGAP) then
           w.dist = min(w.dist - every, every)
           w.lastPrint = state.t
           local kind
-          if g == "sand" and i ~= player then kind = "sand"
+          if swim then kind = "wake"
+          elseif g == "sand" and i ~= player then kind = "sand"
           elseif ashMap and (g == "open" or g == "sand") then kind = "ash"
           elseif w.wet and w.wet > 0 and g ~= "wet" and g ~= nil then kind = "wet" end
           if kind then
             -- across the direction of travel, a foot to each side
             local nx, ny = -dy / step, dx / step
-            local side = a.bike and 0 or (w.foot and 1 or -1)
+            local tire = a.bike and not swim
+            local side = tire and 0 or (w.foot and 1 or -1)
+            if swim then side = side * 1.6 end
             w.foot = not w.foot
             state.laid = (state.laid or 0) + 1
             state.prints[#state.prints + 1] = { x = a.x + nx * side * 2.2, y = a.y - 1 + ny * side * 2.2,
               z = a.ground or 0, ax = dx / step, ay = dy / step, kind = kind, age = 0, life = LIFE[kind],
-              tire = a.bike or nil }
+              tire = tire or nil }
           end
         end
       end
@@ -153,18 +159,29 @@ end
 
 -- flat quads on the ground, each a small oval along the direction of
 -- travel (texture coordinates over scene.lua's 8x8 print texture)
+-- (two lists: prints, and the wake -- foam, drawn lit for the night)
 function Footprints.build()
-  local v, idx, n, ni = {}, {}, 0, 0
+  local pv, pidx, pn, pni = {}, {}, 0, 0
+  local wv, widx, wn, wni = {}, {}, 0, 0
   for _, p in ipairs(state.prints) do
+    local v, idx, n, ni
+    if p.kind == "wake" then v, idx, n, ni = wv, widx, wn, wni else v, idx, n, ni = pv, pidx, pn, pni end
     local c = COL[p.kind]
     local k = p.age / p.life
     local a = c[4] * (k < 0.6 and 1 or (1 - k) / 0.4)
+    if p.kind == "wake" then a = c[4] * (1 - k) end
     -- 4.4 px long, 2.8 wide, along (ax, ay) (smaller vanished on a phone)
     -- (a tire track: 5.6 px dashes, 1.8 wide, end to end)
     local hl, hw = p.tire and 2.8 or 2.2, p.tire and 0.9 or 1.4
+    if p.kind == "wake" then
+      -- a ripple spreading out from the swimmer's path as it fades
+      hl, hw = 2.5 + k * 5, 1.8 + k * 3
+    end
     local lx, ly = p.ax * hl, p.ay * hl
     local wx, wy = -p.ay * hw, p.ax * hw
-    local z = p.z + 0.3
+    -- (the wake a pixel over the water: at a phone's depth precision 0.3
+    -- px over the sea's surface lost to it)
+    local z = p.z + (p.kind == "wake" and 1.0 or 0.3)
     v[n + 1] = { p.x - lx - wx, p.y - ly - wy, z, 0, 0, 0, 0, c[1], c[2], c[3], a }
     v[n + 2] = { p.x - lx + wx, p.y - ly + wy, z, 8, 0, 0, 0, c[1], c[2], c[3], a }
     v[n + 3] = { p.x + lx + wx, p.y + ly + wy, z, 8, 8, 0, 0, c[1], c[2], c[3], a }
@@ -172,8 +189,9 @@ function Footprints.build()
     idx[ni + 1], idx[ni + 2], idx[ni + 3] = n + 1, n + 2, n + 3
     idx[ni + 4], idx[ni + 5], idx[ni + 6] = n + 1, n + 3, n + 4
     n, ni = n + 4, ni + 6
+    if p.kind == "wake" then wn, wni = n, ni else pn, pni = n, ni end
   end
-  return v, n, idx, ni
+  return pv, pn, pidx, pni, wv, wn, widx, wni
 end
 
 return Footprints
