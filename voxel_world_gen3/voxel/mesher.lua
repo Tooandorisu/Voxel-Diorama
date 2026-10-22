@@ -84,14 +84,17 @@ function Mesher.build(grid, VOXEL, tick)
         local h, s, kk, cc, l, f, sw, uo = H[a], S[a], K[a], C[a], L[a], F[a], SW[a], U[a]
         leaf, sway = f == true, sw == true
         water = h < 0
+        -- low swaying tops (tall grass) stay in 8 px pieces: merged into
+        -- big rectangles there were no corners for it to part at
+        local cap = (sw == true and h > 0 and h < 14) and 2 or 1e9
         local w = 1
-        while vx + w < vcols do
+        while vx + w < vcols and w < cap do
           local c = k(vx + w, vy)
           if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then break end
           w = w + 1
         end
         local hgt = 1
-        while vy + hgt < vrows do
+        while vy + hgt < vrows and hgt < cap do
           local ok = true
           for i = 0, w - 1 do
             local c = k(vx + i, vy + hgt)

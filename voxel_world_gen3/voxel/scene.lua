@@ -50,6 +50,10 @@ uniform float uWaterZ; // height of the water's surface (the mirror)
 uniform float uMirrorV; // 1 while drawing the mirrored pass
 uniform float uTimeV;   // seconds (vertex stage copy)
 uniform float uWindV;   // wind: how far foliage sways (0 = still)
+// grass that parts: up to 12 points (mesh space xy, radius, weight) where
+// someone walks through tall grass, or just did
+uniform vec4 uPartV[12];
+uniform float uPartOn;
 attribute vec2 BillOffset;
 
 vec4 position(mat4 transform_projection, vec4 vertex_position) {
@@ -67,7 +71,30 @@ vec4 position(mat4 transform_projection, vec4 vertex_position) {
     xy += vec2(sin(uTimeV * 1.6 + ph) + 0.35 * sin(uTimeV * 2.9 + ph * 1.7),
                0.45 * sin(uTimeV * 1.15 + ph * 1.3)) * (uWindV * hgt * sw);
   }
-  float z = mix(vertex_position.z, 2.0 * uWaterZ - vertex_position.z, uMirrorV);
+  // tall grass parts around whoever walks through it: low swaying
+  // foliage (not tree crowns) bends away from them and flattens a little,
+  // the tips most, and springs back as they leave (the weights fade)
+  float zz = vertex_position.z;
+  if (uPartOn > 0.5) {
+    float f2 = VertexColor.a;
+    float sw2 = (step(0.15, f2) - step(0.35, f2)) + (step(0.65, f2) - step(0.95, f2));
+    float low = sw2 * step(0.3, zz) * (1.0 - step(14.0, zz));
+    if (low > 0.5) {
+      float tip = clamp(zz / 8.0, 0.0, 1.0);
+      for (int i = 0; i < 12; i++) {
+        vec4 pp = uPartV[i];
+        if (pp.w > 0.0) {
+          vec2 d = xy - pp.xy;
+          float dist = length(d);
+          float k = clamp(1.0 - dist / pp.z, 0.0, 1.0);
+          k = k * k * pp.w;
+          xy += (dist > 0.01 ? d / dist : vec2(0.0, 1.0)) * k * 7.0 * tip;
+          zz -= zz * 0.75 * k;
+        }
+      }
+    }
+  }
+  float z = mix(zz, 2.0 * uWaterZ - zz, uMirrorV);
   vec4 anchor = uView * vec4(xy + uShift, z, 1.0);
   vec3 viewPos = anchor.xyz;
   viewPos.xy += vec2(BillOffset.x, BillOffset.y * (1.0 - 2.0 * uMirrorV));
@@ -843,6 +870,7 @@ function Scene.render(p)
   send("uTime", (love.timer and love.timer.getTime() or 0) % 1000)
   send("uTimeV", (p.time or (love.timer and love.timer.getTime()) or 0) % 1000)
   send("uWindV", 0)
+  send("uPartOn", 0)
 
   -- reflections: first the scene mirrored in the water's plane, at half
   -- size, into its own canvas; the water samples it below
@@ -904,6 +932,16 @@ function Scene.render(p)
   send("uCutout", -1)
   send("uTerrain", 1)
   send("uWindV", p.wind or 0)
+  local parts = p.parters
+  if parts and #parts > 0 then
+    local arr = {}
+    for i = 1, 12 do
+      local q = parts[i]
+      arr[i] = q and { q[1], q[2], q[3], q[4] } or { 0, 0, 1, 0 }
+    end
+    send("uPartV", unpack(arr))
+    send("uPartOn", 1)
+  end
   if cloud then
     send("uCloudOn", cloud.strength or 0)
     send("uCloudXY", { cloud.x + (p.shiftX or 0), cloud.y + (p.shiftY or 0) })
@@ -911,6 +949,7 @@ function Scene.render(p)
   send("uStars", p.sky and p.sky.stars or 0)
   send("uFoam", (lit and p.foam) and 1 or 0)
   drawMesh("terrain")
+  send("uPartOn", 0)
   send("uFoam", 0)
   send("uStars", 0)
   send("uCloudOn", 0)

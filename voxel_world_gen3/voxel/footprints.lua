@@ -97,8 +97,9 @@ function Footprints.update(dt, map, actors, groundAt, player, ashMap)
         w.dist = w.dist + counted
         w.path = (w.path or 0) + counted
         local g = groundAt(a.x, a.y)
-        local swim = g == "water"
+        local swim = g == "water" and not a.noWake
         if g == "wet" or swim then w.wet = 1.6 end
+        if g == "water" and a.noWake then g = nil end
         -- (and at most 16 prints a second, a fast bike's pace)
         -- (on a bike: one tire track, a dash every 4 px, not a pair of feet;
         -- in the water the wake, a ripple every 5 px to either side)

@@ -769,6 +769,8 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
   -- own draw function runs, so that draw marks the slot just taken.
   local FXm = Engine.get("src.core.game3.field_effects")
   local fxCollect = FXm and FXm.collectActors
+  local wilds = {}
+  state.wildActors = wilds
   if fxCollect then
     FXm.collectActors = function(list, ...)
       local n0 = list and #list or 0
@@ -776,6 +778,11 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
       if list then
         for i = n0 + 1, #list do
           local e = list[i]
+          -- (another mod's wild Pokemon, appended here as characters --
+          -- Wilds of Hoenn: kind "wild_mon" -- for the footprints)
+          if type(e) == "table" and e.kind == "wild_mon" and e.x and e.y then
+            wilds[#wilds + 1] = { id = e.i, x = e.x, y = e.y }
+          end
           local d = type(e) == "table" and e.draw
           if d then
             e.draw = function(...)
@@ -1182,13 +1189,14 @@ function Bridge.renderPending(R)
       return false
     end
     local seenId = {}
-    local function walker(id, px, py, moving, isPlayer, bike)
+    local function walker(id, px, py, moving, isPlayer, bike, noWake)
       if not (px and py) or seenId[id] then return end
       seenId[id] = true
       local x, y = px + CELL / 2, py + CELL - FOOT_INSET
       if not isPlayer and not onScreen(x, y) then return end
       if HF.insideAt(state.grid, x - sxm, y - sym) then return end
-      walkers[#walkers + 1] = { id = id, x = x, y = y, moving = moving and true or false, bike = bike or nil,
+      walkers[#walkers + 1] = { id = id, x = x, y = y, moving = (moving == nil) and nil or (moving and true or false),
+        bike = bike or nil, noWake = noWake or nil,
         ground = HF.floorAt(state.grid, x - sxm, y - sym) }
       if moving then nmv = nmv + 1 end
       if isPlayer then wp = #walkers end
@@ -1211,6 +1219,12 @@ function Bridge.renderPending(R)
     local Fo = Engine.get("src.world.game3.Follower")
     local fa = Fo and Fo.actor and Fo.actor()
     if fa then walker("follower", fa.x, fa.y, fa.walkPhase == 1) end
+    -- wild Pokemon from another mod (Wilds of Hoenn): their game position;
+    -- whether they walk is told by their steps (moving unknown).  Their own
+    -- mod draws their wake in the water.
+    for _, wa in ipairs(state.wildActors or {}) do
+      walker("wild" .. tostring(wa.id), wa.x, wa.y, nil, false, false, true)
+    end
     state.printMv = nmv
     Footprints.update(dtp, provider.mapId, walkers, groundAt, wp, weatherKind(provider.def) == "ash")
     Scene.setPrints(Footprints.build())
@@ -1218,6 +1232,51 @@ function Bridge.renderPending(R)
     Scene.setPrints({}, 0, {}, 0)
   end
   local BREATH = { off = 0, subtle = 0.022, normal = 0.04 }
+  -- grass that parts: whoever stands in tall grass pushes it aside; where
+  -- they just were it springs back over half a second (scene.lua)
+  do
+    local parts = {}
+    if settings.sway ~= false and isOutdoor(provider.def) then
+      local now = love.timer and love.timer.getTime() or 0
+      local sxm, sym = state.shiftX or 0, state.shiftY or 0
+      local trail = state.partTrail or {}
+      local live = {}
+      for _, a in ipairs(shown) do
+        if not a.fx then
+          local c = provider.cell(math.floor(a.x / CELL), math.floor((a.y - 2) / CELL))
+          if c and c.kind == "grass" then
+            live[#live + 1] = { a.x - sxm, a.y - 2 - sym, 13, 1 }
+            -- leave a point behind every few px walked
+            local last = trail[#trail]
+            local moved = true
+            for i = #trail, math.max(1, #trail - 6), -1 do
+              local q = trail[i]
+              if math.abs(q.x - (a.x - sxm)) + math.abs(q.y - (a.y - 2 - sym)) < 6 then moved = false break end
+            end
+            if moved then trail[#trail + 1] = { x = a.x - sxm, y = a.y - 2 - sym, t = now } end
+          end
+        end
+      end
+      local keep = {}
+      for _, q in ipairs(trail) do
+        local age = now - q.t
+        if age < 0.7 and age >= 0 then keep[#keep + 1] = q end
+      end
+      while #keep > 16 do table.remove(keep, 1) end
+      state.partTrail = keep
+      for _, q in ipairs(live) do if #parts < 12 then parts[#parts + 1] = q end end
+      for i = #keep, 1, -1 do
+        if #parts >= 12 then break end
+        local q = keep[i]
+        local age = now - q.t
+        -- (a little overshoot as it springs back)
+        local w = math.max(0, 1 - age / 0.7)
+        w = w * w * (1 + 0.25 * math.sin(age * 18))
+        parts[#parts + 1] = { q.x, q.y, 10, w * 0.8 }
+      end
+    end
+    state.parters = parts
+  end
   Scene.setActors(shown, SLOT_W, SLOT_H, FOOT_X, FOOT_Y, tonumber(settings.solid) or 0,
     BREATH[settings.breath or "subtle"] or 0, love.timer and love.timer.getTime() or 0,
     settings.blink ~= false)
@@ -1355,6 +1414,7 @@ function Bridge.renderPending(R)
     tint = tint,
     desat = (dayNight(provider.def) or {}).desat,
     night = settings.nightlights ~= false and Bridge.nightLevel(dayNight(provider.def)) or 0,
+    parters = state.parters,
     -- the wind eases to the weather's over a few seconds
     wind = (function()
       local goal = Bridge.windFor(provider.def)
