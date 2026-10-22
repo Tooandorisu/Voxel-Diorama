@@ -80,6 +80,7 @@ return function(mod)
     { key = "footprints", label = "FOOTPRINTS", type = "toggle", default = true },
     { key = "clouds", label = "CLOUDS & STARS", type = "toggle", default = true },
     { key = "waves", label = "WAVES & FOAM", type = "toggle", default = true },
+    { key = "caveFx", label = "CAVE ATMOSPHERE", type = "toggle", default = true },
     { key = "shadows", label = "SHADOWS", type = "toggle", default = true },
     { key = "xray", label = "SEE-THROUGH", type = "toggle", default = true },
     { key = "rate", label = "3D RATE", type = "choice", default = "auto",
@@ -121,6 +122,7 @@ return function(mod)
       footprints = mod.options:get("footprints") ~= false,
       clouds = mod.options:get("clouds") ~= false,
       waves = mod.options:get("waves") ~= false,
+      caveFx = mod.options:get("caveFx") ~= false,
       blur = mod.options:get("blur") ~= false,
       roundTrees = mod.options:get("roundTrees") ~= false,
       roofs = mod.options:get("roofs") ~= false,
@@ -196,7 +198,7 @@ return function(mod)
     return next(game, ev)
   end)
 
-  mod.exports.version = "1.25.1"
+  mod.exports.version = "1.26.0"
   mod.exports.level = function() return Bridge.level() end
   -- read-only timings for tools/tests: { capture, render, mesh, avg } in ms
   mod.exports.stats = function()

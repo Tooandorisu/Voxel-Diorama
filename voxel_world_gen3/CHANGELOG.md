@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.26.0
+
+- Cave atmosphere.  In caves:
+  - Dust hangs in the air, faint motes drifting and catching the light,
+    most of them around you.
+  - Now and then a drop of water falls from the dark above and lands with
+    a little splash -- on cave water a ring that spreads out.
+  - In a dark cave the Flash circle glows warm like a torch: golden toward
+    its edge, dimming there, and breathing a little.
+- New option CAVE ATMOSPHERE (on by default).
+- PERF STATS in caves: "cavefx mN dN rN" -- dust motes, falling drops,
+  splashes.
+
 ## 1.25.1
 
 - The scene no longer changes shape as you walk (cliffs, trees and

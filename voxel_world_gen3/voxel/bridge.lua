@@ -33,6 +33,7 @@ local Lighting = use("lighting")
 local DayNight = use("daynight")
 local Weather3D = use("weather3d")
 local Critters = use("critters")
+local Caves = use("caves")
 local Smoke = use("smoke")
 local Footprints = use("footprints")
 Smoke.init(HF)
@@ -85,6 +86,7 @@ local settings = {
   footprints = true, -- prints in sand and ash, wet prints out of puddles
   clouds = true, -- cloud shadows drifting over the ground, clouds and stars in the sky
   waves = true, -- foam along shores, waves rolling in, a wake behind swimmers
+  caveFx = true, -- dust in the air and dripping water in caves, a warm Flash glow
   yaw = 0, -- camera turn in degrees (+ = swing east / RIGHT, - = west / LEFT)
   fov = 30,
 }
@@ -1456,6 +1458,8 @@ function Bridge.renderPending(R)
     end
     -- critters: outdoors, not in rain (fireflies hide, birds stay put)
     if settings.critters ~= false and isOutdoor(provider.def) then
+      Scene.setCaveFx({}, 0, {}, 0)
+      state.caveNote = nil
       local dn = dayNight(provider.def)
       local night = Bridge.nightLevel(dn)
       if kind then night = 0 end
@@ -1463,6 +1467,26 @@ function Bridge.renderPending(R)
       Critters.update(dt, night, kind == nil and night < 0.3, rect, sxs, sys, budget)
       Scene.setCritters(Critters.build(sxs, sys))
     else
+      -- caves: dust in the air, water dripping (through the same glow pass)
+      local isCave = tonumber(provider.def and provider.def.mapType) == 4
+        or (tonumber(provider.def and provider.def.cave) or 0) > 0
+      if settings.caveFx ~= false and isCave then
+        local sxs, sys = state.shiftX or 0, state.shiftY or 0
+        local g = state.grid
+        local function floorAt(x, y) return g and HF.floorAt(g, x - sxs, y - sys) or 0 end
+        local function water(x, y)
+          local c = provider.cell(math.floor(x / CELL), math.floor(y / CELL))
+          return c ~= nil and c.kind == "water"
+        end
+        if state.caveMap ~= provider.mapId then state.caveMap = provider.mapId; Caves.reset() end
+        Caves.update(dt, rect, state.focusX or 0, (state.focusY or 0) + CELL / 2, floorAt, water, budget)
+        Scene.setCaveFx(Caves.build())
+        local cs = Caves._state
+        state.caveNote = ("  cavefx m%d d%d r%d"):format(#cs.motes, #cs.drops, #cs.rings)
+      else
+        Scene.setCaveFx({}, 0, {}, 0)
+        state.caveNote = nil
+      end
       Scene.setCritters({}, 0, {}, 0, {}, 0, {}, 0)
     end
     local wt = Weather3D.tint()
@@ -1510,6 +1534,7 @@ function Bridge.renderPending(R)
     desat = (dayNight(provider.def) or {}).desat,
     night = settings.nightlights ~= false and Bridge.nightLevel(dayNight(provider.def)) or 0,
     parters = state.parters,
+    warmFlash = settings.caveFx ~= false,
     -- the wind eases to the weather's over a few seconds
     wind = (function()
       local goal = Bridge.windFor(provider.def)
@@ -1758,6 +1783,7 @@ function Bridge.install()
         local def = Map and Map.currentDef and Map.currentDef()
         if def then
           local wet = looksOutdoor(def)
+          if state.caveNote then text = text .. "\n" .. state.caveNote:gsub("^%s+", "") end
           text = text .. ("\nmap type %s  kind %s  env %s  water/grass %s  outdoor %s"):format(
             tostring(def.mapType), tostring(def.kind), tostring(def.environment),
             wet and (math.floor(wet * 100 + 0.5) .. "%") or "?", tostring(isOutdoor(def)))
