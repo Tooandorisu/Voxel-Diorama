@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.24.1", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.25.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1178,7 +1178,9 @@ do
     return { kind = "solid", mid = 950 + (cy % 2), pair = "L" } -- a wall: rows of two tiles, every cell across alike
   end
   HF._tileRock = {}
-  local g = HF.build({ cell = cell }, 0, 0, 10, 8, { lumps = false })
+  local g = HF.build({ cell = cell, family = "frlg" }, 0, 0, 10, 8, { lumps = false })
+  local r = HF.build({ cell = cell, family = "rse" }, 0, 0, 10, 8, { lumps = false })
+  T.eq(r.patternTrees, nil, "RSE forests are left to their art")
   T.check((g.patternTrees or 0) > 0, "a forest is found by its pattern (" .. tostring(g.patternTrees) .. ")")
   local kf = (4 * 4 + 1) * g.vcols + 2 * 4 + 1 + 1
   local kw = (4 * 4 + 1) * g.vcols + 7 * 4 + 1 + 1

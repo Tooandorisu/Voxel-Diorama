@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.25.0
+
+- Grass that parts.  Tall grass stands a little taller, and bends away
+  around whoever walks through it -- you, your follower, NPCs -- and
+  flattens a little under their feet.  Where they just were it springs
+  back over half a second, with a small overshoot, so a path through the
+  grass ripples closed behind you.  Comes with SWAYING TREES.
+- The forest pattern test (1.24.1) runs in FireRed/LeafGreen only: in
+  Ruby/Sapphire/Emerald, whose forests already came out right, it turned
+  Petalburg Woods into one block of tree tops.
+- Wilds of Hoenn: its wild Pokemon now leave footprints too (sand, ash,
+  wet prints out of puddles -- their own mod draws their wake in the
+  water).  Being characters of the scene, they already stood up in 3D
+  with shadows, the day's light and night lamps, reflections in the
+  water, cloud shadows passing over them, and now part the tall grass.
+
 ## 1.24.1
 
 - Mountains and rocky hills no longer change shape as you walk (FireRed's

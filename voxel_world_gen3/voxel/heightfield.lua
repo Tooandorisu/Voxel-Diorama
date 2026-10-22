@@ -377,9 +377,11 @@ function HF.build(provider, x0, y0, cols, rows, opts)
               grid.hasWater = true
             else
               local bi, bj = i - i % blk, j - j % blk
+              -- (taller than it was, 1..5: tall enough to part around
+              -- whoever walks through it, still under a character's knees)
               local off, shade = relief(cx * CELL + bi * VOXEL + blk * 2,
-                cy * CELL + bj * VOXEL + blk * 2, 1, 5)
-              H[k], L[k] = max(1, off), shade
+                cy * CELL + bj * VOXEL + blk * 2, 3, 8)
+              H[k], L[k] = max(3, off), shade
             end
           end
         end
@@ -825,7 +827,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- pattern needs no art: the same verdict wherever the camera is.
   -- (A cliff face repeats every cell, a roof or a wall does not repeat
   -- that way at all.)
-  do
+  -- (FireRed/LeafGreen only: Ruby/Sapphire/Emerald forests already come
+  -- out right by their art -- marked here too, all of Petalburg Woods
+  -- turned into one block of tree tops)
+  if provider.family == "frlg" then
     local function sm(cx, cy)
       local c = at(cx, cy)
       if c and c.kind == "solid" and c.mid ~= nil and not (c.tree and not c.patternTree) then return c.mid end
