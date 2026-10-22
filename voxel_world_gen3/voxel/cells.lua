@@ -170,6 +170,12 @@ function Cells.provider()
     -- the tileset cannot tell
     shape = function(info) return info and Tiles.shape(info.pair, info.mid) end,
     over = function(info) return info and Tiles.overCount(info.pair, info.mid) end,
+    -- a cell's art at a pixel, from its tileset (Tiles.pixel); nil when
+    -- the tileset is not resident
+    tilePixel = function(info, x, y)
+      if not (info and info.pair and info.mid) then return nil end
+      return Tiles.pixel(info.pair, info.mid, x, y)
+    end,
     family = frlg and "frlg" or "rse",
   }
 end
