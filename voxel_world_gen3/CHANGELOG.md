@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.24.1
+
+- Mountains and rocky hills no longer change shape as you walk (FireRed's
+  Lavender Town and Route 8 showed it most).  Whether a block is rock or
+  a house was judged from the map's picture, which is only there near the
+  camera: the far columns of a mountain came out as houses with roofs,
+  then turned to rock once on screen, every few steps.  A tile judged rock
+  once is now remembered as rock, everywhere and every time after.
+- Forests are also found by their tile pattern (a tree is two cells by two)
+  or by a crown drawn over sprites (FRLG), not only by the FRLG tree list
+  or a green colour -- trees in a tileset of their own, whatever colour.
+- PERF STATS: "ptree N/C/K" -- forest cells found by pattern, cells
+  matching it, cells with a crown over sprites.
+
 ## 1.24.0
 
 - Waves & shorelines:

@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.24.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.24.1", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1158,6 +1158,50 @@ do
   T.check(edge and edge <= 0.25, "water at the shore is near it (" .. tostring(edge) .. ")")
   T.check(out == nil or out == 1, "water far out is open sea")
   T.eq(gw.shore[1], 0, "land reads as the shore")
+end
+
+do
+  -- a forest by its tile pattern (Lavender Town's grey trees: not in the
+  -- FRLG tree list, not green): tiles repeating every second cell across
+  -- and down are trees, with or without art; a plain repeating wall is not
+  local rows = {}
+  for y = 0, 7 do
+    local r = {}
+    for x = 0, 9 do r[#r + 1] = "#" end
+    rows[#rows + 1] = table.concat(r)
+  end
+  local function cell(cx, cy)
+    if cx < 0 or cy < 0 or cx > 9 or cy > 7 then return nil end
+    if cx < 5 then
+      return { kind = "solid", mid = 900 + (cx % 2) + 2 * (cy % 2), pair = "L" } -- forest: a 2x2 tree tiled
+    end
+    return { kind = "solid", mid = 950 + (cy % 2), pair = "L" } -- a wall: rows of two tiles, every cell across alike
+  end
+  HF._tileRock = {}
+  local g = HF.build({ cell = cell }, 0, 0, 10, 8, { lumps = false })
+  T.check((g.patternTrees or 0) > 0, "a forest is found by its pattern (" .. tostring(g.patternTrees) .. ")")
+  local kf = (4 * 4 + 1) * g.vcols + 2 * 4 + 1 + 1
+  local kw = (4 * 4 + 1) * g.vcols + 7 * 4 + 1 + 1
+  T.check(g.SW[kf] == true, "the forest is trees (it sways)")
+  T.check(not g.SW[kw], "the wall is not")
+end
+
+do
+  -- rock remembered per tile: a mountain judged once with its art on
+  -- screen stays a mountain when built again without it (the picture is
+  -- only there near the camera)
+  local function cell(cx, cy)
+    if cx < 0 or cy < 0 or cx > 7 or cy > 9 then return nil end
+    if cy < 8 then return { kind = "solid", mid = 777, pair = "R" } end
+    return { kind = "ground", mid = 1, pair = "R" }
+  end
+  HF._rockMem = {}
+  local rocky = function(wx, wy) if wy < 8 * 16 then return 0.78, 0.62, 0.5 end return 0.4, 0.7, 0.35 end
+  local a = HF.build({ cell = cell, color = rocky }, 0, 0, 8, 10, { lumps = false, rock = true, roofs = true })
+  local b = HF.build({ cell = cell, color = function() return nil end }, 0, 0, 8, 10, { lumps = false, rock = true, roofs = true })
+  local k = (7 * 4 + 1) * a.vcols + 3 * 4 + 1 + 1
+  T.eq(b.H[k], a.H[k], "a mountain built without its art keeps its height (" .. tostring(a.H[k]) .. ")")
+  T.eq(#b.roofs, #a.roofs, "and gets no house roofs")
 end
 
 do

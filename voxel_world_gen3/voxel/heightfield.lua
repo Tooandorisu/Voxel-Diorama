@@ -70,6 +70,9 @@ function HF.rockHeight(n)
   return nil
 end
 
+HF._tileRock = {} -- [pair:mid] = rock-coloured (forest pattern test)
+HF._rockMem = {}  -- [pair:mid] = rock by its art (rockCell), once seen
+
 local function isFoliageColor(r, g, b)
   -- leafy greens and the dark blue-greens FRLG uses for tree shadow
   return g > r * 1.08 and g > b * 0.95 and g > 0.18
@@ -311,16 +314,35 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     return hits >= 3
   end
 
+  -- Rock by its art -- remembered per tile.  The map's picture is only
+  -- there near the camera, and a mountain's far columns, judged without
+  -- it, came out as houses with roofs, then turned to rock once on screen:
+  -- Lavender Town's rocky hills changed shape with every step (the
+  -- "buildings glitching while moving").  A tile judged rock once, on
+  -- screen, is rock everywhere and every time after.
+  local tileRockMem = HF._rockMem
   local function rockCell(cx, cy)
-    if not color then return false end
-    local hits = 0
-    for i = 0, 3 do
-      local sx = cx * CELL + 3 + (i % 2) * 9
-      local sy = cy * CELL + 3 + floor(i / 2) * 9
-      local r, g, b = color(sx, sy)
-      if r and isRockColor(r, g, b) then hits = hits + 1 end
+    local c = at(cx, cy)
+    local key = c and c.mid ~= nil and (tostring(c.pair) .. ":" .. tostring(c.mid)) or nil
+    if color then
+      local hits, seen = 0, 0
+      for i = 0, 3 do
+        local sx = cx * CELL + 3 + (i % 2) * 9
+        local sy = cy * CELL + 3 + floor(i / 2) * 9
+        local r, g, b = color(sx, sy)
+        if r then
+          seen = seen + 1
+          if isRockColor(r, g, b) then hits = hits + 1 end
+        end
+      end
+      if seen == 4 then
+        local v = hits >= 3
+        if key then tileRockMem[key] = v end
+        return v
+      end
     end
-    return hits >= 3
+    if key and tileRockMem[key] ~= nil then return tileRockMem[key] end
+    return false
   end
 
   local function relief(wx, wy, lo, hi)
@@ -793,6 +815,102 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
   end
 
+  -- Forests by their tile pattern.  A tree is two cells wide and two tall,
+  -- so a forest repeats its tiles every second cell across and down: the
+  -- cell two below (and two across) is the same tile, the one right below
+  -- (and right beside) is not.  Lavender Town's grey trees (its own
+  -- tileset, not in the FRLG tree list, and too grey to pass for foliage
+  -- by colour) stood as tall blocks -- judged by art that is only there
+  -- near the camera, so they also changed shape as the view moved.  The
+  -- pattern needs no art: the same verdict wherever the camera is.
+  -- (A cliff face repeats every cell, a roof or a wall does not repeat
+  -- that way at all.)
+  do
+    local function sm(cx, cy)
+      local c = at(cx, cy)
+      if c and c.kind == "solid" and c.mid ~= nil and not (c.tree and not c.patternTree) then return c.mid end
+      return nil
+    end
+    -- (mountains repeat their rock tiles too: a tile whose art is rock
+    -- coloured is never a tree.  Judged once per tile, when its art is on
+    -- screen, and remembered, so the verdict does not depend on where the
+    -- camera is either)
+    local function notRock(cx, cy, m)
+      local c = at(cx, cy)
+      local key = tostring(c and c.pair) .. ":" .. tostring(m)
+      local v = HF._tileRock[key]
+      if v == nil then
+        local st = cellStats(cx, cy)
+        if st then
+          v = rockCell(cx, cy) or isRockColor(st.r, st.g, st.b)
+          HF._tileRock[key] = v
+        end
+      end
+      return v ~= true
+    end
+    -- a crown drawn over sprites (FRLG: the player walks behind a tree's
+    -- top half) in this cell or the one above or below: a tree, whatever
+    -- its colour (Lavender Town's trees are brown-grey enough to pass for
+    -- rock)
+    local overOf = provider.over
+    local function crown(cx, cy)
+      if not overOf then return false end
+      for dy = -1, 1 do
+        local c = at(cx, cy + dy)
+        local n = c and overOf(c)
+        if n and n >= 40 then return true end
+      end
+      return false
+    end
+    local function forestAt(cx, cy)
+      local m = sm(cx, cy)
+      if not m or not (crown(cx, cy) or notRock(cx, cy, m)) then return false end
+      local votes, seen = 0, 0
+      for _, d in ipairs({ { 0, 2 }, { 0, -2 }, { 2, 0 }, { -2, 0 } }) do
+        local m2 = sm(cx + d[1], cy + d[2])
+        if m2 ~= nil then
+          seen = seen + 1
+          -- (the cell between must be a different tile: not a plain
+          -- repeating wall)
+          local mid1 = sm(cx + d[1] / 2, cy + d[2] / 2)
+          if m2 == m and mid1 ~= nil and mid1 ~= m then votes = votes + 1 end
+        end
+      end
+      return seen >= 2 and votes >= 2 and votes * 4 >= seen * 3
+    end
+    local fmemo = {}
+    local function forest(cx, cy)
+      local key = (cy - y0 + 64) * 65536 + (cx - x0 + 64)
+      local v = fmemo[key]
+      if v == nil then v = forestAt(cx, cy); fmemo[key] = v end
+      return v
+    end
+    local marks = {}
+    local cand, crowns = 0, 0
+    for cx = x0 - 1, x0 + cols do
+      tick()
+      for cy = y0 - 13, y0 + rows + 12 do
+        if crown(cx, cy) then crowns = crowns + 1 end
+        if forest(cx, cy) then
+          cand = cand + 1
+          -- (a forest needs a few such cells together: one stray match on
+          -- a patterned roof is not a tree)
+          local n = 0
+          for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+            if forest(cx + d[1], cy + d[2]) then n = n + 1 end
+          end
+          if n >= 2 then marks[#marks + 1] = at(cx, cy) end
+        end
+      end
+    end
+    local marked = 0
+    for _, c in ipairs(marks) do
+      if not c.tree then c.tree, c.patternTree = true, true; marked = marked + 1 end
+    end
+    grid.patternTrees = marked
+    grid.patternCand, grid.crownCells = cand, crowns
+  end
+
   -- Trees by their art.  FRLG trees are known by metatile id (cells.lua);
   -- Ruby/Sapphire/Emerald have no such list, and their forests alternate a
   -- solid trunk row with a walkable canopy row -- left alone every trunk
@@ -988,6 +1106,13 @@ function HF.build(provider, x0, y0, cols, rows, opts)
             end
           end
           if n > 0 and rocky * 2 < n then caveMound = false end
+        end
+        -- (a forest known by its tile pattern is trees, cave or no cave)
+        if caveMound then
+          for y = top, bottom do
+            local c = at(cx, y)
+            if c and c.patternTree then caveMound = false break end
+          end
         end
         if caveMound then
           foliage, tree = false, false

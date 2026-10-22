@@ -25,12 +25,14 @@ local Tiles = {}
 local floor = math.floor
 local cache = {}
 Tiles._cache = cache
+local overCache = {}
 
 -- for tests: a stand-in for tileset_native
 local source
 function Tiles.setSource(src)
   source = src
   for k in pairs(cache) do cache[k] = nil end
+  for k in pairs(overCache) do overCache[k] = nil end
 end
 
 local function tileset(pair)
@@ -110,6 +112,27 @@ function Tiles.shape(pair, mid)
   s.top, s.bottom = s.minY == 0, s.maxY == 15
   cache[key] = s
   return s
+end
+
+-- How many pixels of a metatile are drawn over sprites (its top layer in
+-- the over image alone): FRLG draws a tree's crown there, so the player
+-- walks behind it; rock, roofs and walls draw nothing there.
+-- nil while the tileset is not loaded, 0 when it has no layer split.
+function Tiles.overCount(pair, mid)
+  if not (pair and mid) then return nil end
+  local key = tostring(pair) .. ":" .. tostring(mid)
+  local v = overCache[key]
+  if v ~= nil then return v end
+  local ts = tileset(pair)
+  if not ts then return nil end
+  local slot = ts.midToSlot and ts.midToSlot[mid]
+  if not (ts.overImageData and ts.cols and slot) then
+    overCache[key] = 0
+    return 0
+  end
+  local _, n = opaque(ts.overImageData, (slot % ts.cols) * 16, floor(slot / ts.cols) * 16)
+  overCache[key] = n
+  return n
 end
 
 return Tiles

@@ -1608,8 +1608,9 @@ function Bridge.install()
             wet and (math.floor(wet * 100 + 0.5) .. "%") or "?", tostring(isOutdoor(def)))
           local g = state.grid
           local rf = g and g.roofs or {}
-          text = text .. ("  cave %d/%d  roofs %d %s  gaps %d"):format(g and g.caveMounds or 0,
-            g and g.caveFlat or 0, #rf, rf[1] and rf[1].ridge or "-", g and g.gapFills or 0)
+          text = text .. ("  cave %d/%d  roofs %d %s  gaps %d  ptree %d/%d/%d"):format(g and g.caveMounds or 0,
+            g and g.caveFlat or 0, #rf, rf[1] and rf[1].ridge or "-", g and g.gapFills or 0, g and g.patternTrees or 0,
+            g and g.patternCand or 0, g and g.crownCells or 0)
           text = text .. "  blink " .. tostring(Scene.blinkFrames or 0)
           do
             local cs = Critters._state
