@@ -904,14 +904,108 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
   end)
   if okD then data = d end
   local gx, gy = p.camX, p.camY
-  local color = nil
+  local shot = nil
   if data then
-    color = function(wx, wy)
+    shot = function(wx, wy)
       local ix, iy = math.floor((wx - gx) / 4), math.floor((wy - gy) / 4)
       if ix < 0 or iy < 0 or ix >= qw or iy >= qh then return nil end
       local r, g, b = data:getPixel(ix, iy)
       return r, g, b
     end
+  end
+  -- The art is read from the tilesets themselves where they are loaded:
+  -- the same for every cell of a tile, near the camera or far from it.
+  -- (From the screen capture alone, a cell near its edge -- sampled at a
+  -- quarter size, or not at all past it -- was judged differently from
+  -- the same cell in the middle a few steps later: rock turned house,
+  -- relief came and went, the scene changed shape as you walked.)  The
+  -- capture is the fallback where a tileset is not resident.
+  local color = shot
+  if settings.tileArt ~= false and provider.tilePixel then
+    local cells, CELLW = {}, CELL
+    state.artCheck = state.artCheck or {}
+    local artCheck = state.artCheck
+    local tp = provider.tilePixel
+    local nTile, nShot = 0, 0
+    color = function(wx, wy)
+      local cx, cy = math.floor(wx / CELLW), math.floor(wy / CELLW)
+      local key = cy * 65536 + cx
+      local c = cells[key]
+      if c == nil then c = provider.cell(cx, cy) or false; cells[key] = c end
+      -- the capture first where it has the cell (it is the very picture
+      -- on screen: RSE forests and the like were made to look right by
+      -- it), the tileset where it does not -- past its edge, where a cell
+      -- used to have no art at all and was built differently than once
+      -- on screen.  (Never for the border tiling beyond every map: it
+      -- has no art on screen either, and stood up as a wall of sand.)
+      -- A tileset's art is only trusted once it is seen to match the
+      -- screen: every sample both have is compared (and the same with red
+      -- and blue swapped, in case the atlas stores them the other way).
+      -- A first try trusted it blindly, and somewhere it did not match --
+      -- a FireRed forest read as orange rock off screen and turned to
+      -- forest as it came into view.
+      local lx, ly = math.floor(wx - cx * CELLW), math.floor(wy - cy * CELLW)
+      if shot then
+        local r, g, b = shot(wx, wy)
+        if r then
+          nShot = nShot + 1
+          if c and not c.border and c.pair then
+            local ck = artCheck[c.pair]
+            if not ck then ck = { n = 0, ok = 0, sw = 0 }; artCheck[c.pair] = ck end
+            if ck.n < 4000 then
+              -- (the quarter-size capture samples near, not exactly at, the
+              -- 4x4 block's centre: the best match within a pixel counts)
+              local d, ds, any = 9, 9, false
+              for oy = -1, 1 do
+                for ox = -1, 1 do
+                  local qx, qy = lx + ox, ly + oy
+                  if qx >= 0 and qy >= 0 and qx < 16 and qy < 16 then
+                    local tr, tg, tb = tp(c, qx, qy)
+                    if tr then
+                      any = true
+                      local e = math.abs(tr - r) + math.abs(tg - g) + math.abs(tb - b)
+                      local es = math.abs(tb - r) + math.abs(tg - g) + math.abs(tr - b)
+                      if e < d then d = e end
+                      if es < ds then ds = es end
+                    end
+                  end
+                end
+              end
+              if any then
+                local all = artCheck._all
+                if not all then all = { n = 0, ok = 0, sw = 0 }; artCheck._all = all end
+                ck.n, all.n = ck.n + 1, all.n + 1
+                if d < 0.12 then ck.ok, all.ok = ck.ok + 1, all.ok + 1 end
+                if ds < 0.12 then ck.sw, all.sw = ck.sw + 1, all.sw + 1 end
+              end
+            end
+          end
+          return r, g, b
+        end
+      end
+      if c and not c.border and c.pair then
+        -- (a tileset not checked yet -- the next map's, a forest beyond the
+        -- screen -- goes by the verdict over all of them: the atlases are
+        -- all made the same way, and on a phone every one checked matched
+        -- 98-99%.  One that was checked and did not match is never used.)
+        local ck = artCheck[c.pair]
+        if not ck or ck.n < 200 then ck = artCheck._all end
+        if ck and ck.n >= 200 then
+          local swap = ck.sw > ck.ok
+          local good = (swap and ck.sw or ck.ok) / ck.n
+          if good >= 0.8 then
+            local r, g, b = tp(c, lx, ly)
+            if r then
+              nTile = nTile + 1
+              if swap then return b, g, r end
+              return r, g, b
+            end
+          end
+        end
+      end
+      return nil
+    end
+    state.artStats = function() return nTile, nShot end
   end
   local q = preset()
   local grid = HF.build({ cell = provider.cell, color = color, shape = provider.shape },
@@ -934,6 +1028,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
       cave = tonumber(provider.def and provider.def.mapType) == 4
         or (tonumber(provider.def and provider.def.cave) or 0) > 0 })
   if data then data:release() end
+  if state.artStats then state.artTile, state.artShot = state.artStats() end
   Bridge.saveLamps()
   local verts, idx, nv, ni = Mesher.build(grid, HF.VOXEL, tick)
   state.meshVerts, state.meshTris = nv, ni / 3
@@ -1675,6 +1770,13 @@ function Bridge.install()
           do
             local cs = Critters._state
             text = text .. ("  crit %d/%d f%d"):format(#cs.flies, #cs.birds, cs.flocks or 0)
+            text = text .. ("  art t%d s%d"):format(state.artTile or 0, state.artShot or 0)
+            for pr, ck in pairs(state.artCheck or {}) do
+              if ck.n > 0 and pr ~= "_all" then
+                text = text .. (" %s:%d%%%s"):format(tostring(pr):sub(1, 14), math.floor(100 * math.max(ck.ok, ck.sw) / ck.n),
+                  ck.sw > ck.ok and "sw" or "")
+              end
+            end
             local fs = Footprints._state
             local nwk = 0
             for _, pr in ipairs(fs.prints) do if pr.kind == "wake" then nwk = nwk + 1 end end

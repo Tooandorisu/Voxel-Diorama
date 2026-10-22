@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.25.1
+
+- The scene no longer changes shape as you walk (cliffs, trees and
+  buildings deforming "here and there", reported on FireRed, PC and
+  Android).  Many of the heightfield's choices -- rock or house, tree or
+  wall, the relief on cliffs and treetops -- read the map's art, and that
+  art came from a quarter-size capture of the screen: a cell near its
+  edge, or past it, read differently from the same cell in the middle a
+  few steps later, and every rebuild while walking reshaped it.  Where the
+  capture has no picture of a cell, its art is now read from the tileset
+  itself -- the same pixels the screen would show -- so a cell is judged
+  the same before it comes on screen as after.  (Not for the border
+  tiling beyond every map.)  A tileset's art is only used once it has been
+  seen to match the screen (80% of samples), so a tileset whose art reads
+  differently is never trusted.
+- PERF STATS: after "art", each tileset seen and how well its art matches
+  the screen ("sw": with red and blue swapped).
+- PERF STATS: "art tN sM" -- art samples read from the tilesets / from the
+  screen capture in the last rebuild.
+
 ## 1.25.0
 
 - Grass that parts.  Tall grass stands a little taller, and bends away

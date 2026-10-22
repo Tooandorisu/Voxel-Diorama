@@ -135,4 +135,27 @@ function Tiles.overCount(pair, mid)
   return n
 end
 
+-- A metatile's art at a pixel (x, y in 0..15), as drawn: the layers under
+-- sprites, then the top layer over them.  Read from the tileset itself, so
+-- the same for every cell built from that tile, wherever the camera is --
+-- the heightfield's tests on art (rock or house, trees, relief) gave a
+-- different answer near the edge of the screen capture than in its
+-- middle, and the scene changed shape as you walked.
+-- nil when the tileset is not resident.
+function Tiles.pixel(pair, mid, x, y)
+  local ts = tileset(pair)
+  if not ts then return nil end
+  local slot = ts.midToSlot and ts.midToSlot[mid]
+  local data = ts.imageData
+  if slot == nil or not (data and ts.cols) then return nil end
+  local px, py = (slot % ts.cols) * 16 + x, floor(slot / ts.cols) * 16 + y
+  local r, g, b, a = data:getPixel(px, py)
+  if ts.overImageData then
+    local r2, g2, b2, a2 = ts.overImageData:getPixel(px, py)
+    if a2 and a2 > 0.5 then r, g, b, a = r2, g2, b2, 1 end
+  end
+  if not a or a < 0.5 then return nil end
+  return r, g, b
+end
+
 return Tiles

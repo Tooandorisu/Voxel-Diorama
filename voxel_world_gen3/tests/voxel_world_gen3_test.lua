@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.25.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.25.1", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -878,6 +878,17 @@ do
   local nl = 0
   for _, l in ipairs(nb.lights) do if l.kind == "lamp" then nl = nl + 1 end end
   T.eq(nl, 3, "a neighbouring town keeps its lamps while you stand on the route")
+  -- a tile's art from the tileset (the same wherever the camera is): the
+  -- layer under sprites, the top layer over it
+  Tiles.setSource({ _pairs = { art = { cols = 4, midToSlot = { [9] = 1 },
+    imageData = { getPixel = function(_, x, y) return 0.2, 0.6, 0.2, 1 end },
+    overImageData = { getPixel = function(_, x, y)
+      local lx = x % 16
+      return 0.8, 0.5, 0.4, (lx >= 4 and lx < 8) and 1 or 0 end } } } })
+  local r1, g1 = Tiles.pixel("art", 9, 1, 1)
+  local r2 = Tiles.pixel("art", 9, 5, 1)
+  T.check(g1 == 0.6 and r2 == 0.8, "a tile's art reads its bottom layer, the top layer over it")
+  T.eq(Tiles.pixel("art", 99, 1, 1), nil, "an unknown tile has no art")
   Tiles.setSource(nil)
 
   -- doorways: only real doors
