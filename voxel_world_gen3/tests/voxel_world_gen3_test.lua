@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.25.1", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.26.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -59,7 +59,7 @@ local HF, Mesher, Camera = use("heightfield"), use("mesher"), use("camera")
 -- inside the mod sandbox `package` is a stand-in whose `loaded` is empty, so
 -- every engine lookup must go through require (voxel/engine.lua)
 for _, f in ipairs({ "main.lua", "voxel/bridge.lua", "voxel/cells.lua", "voxel/scene.lua",
-                     "voxel/heightfield.lua", "voxel/mesher.lua", "voxel/camera.lua", "voxel/tiles.lua", "voxel/critters.lua", "voxel/smoke.lua", "voxel/footprints.lua" }) do
+                     "voxel/heightfield.lua", "voxel/mesher.lua", "voxel/camera.lua", "voxel/tiles.lua", "voxel/critters.lua", "voxel/smoke.lua", "voxel/footprints.lua", "voxel/caves.lua" }) do
   T.check(not read(MOD .. "/" .. f):find("package%.loaded"), f .. " never reads package.loaded")
 end
 do
@@ -1215,6 +1215,29 @@ do
   local k = (7 * 4 + 1) * a.vcols + 3 * 4 + 1 + 1
   T.eq(b.H[k], a.H[k], "a mountain built without its art keeps its height (" .. tostring(a.H[k]) .. ")")
   T.eq(#b.roofs, #a.roofs, "and gets no house roofs")
+end
+
+do
+  -- caves: dust hangs in the air near the player; a drop falls and leaves
+  -- a ring where it lands, wider on water
+  local CV = use("caves")
+  CV.reset()
+  local rect = { 0, 0, 320, 240 }
+  for _ = 1, 600 do CV.update(1 / 60, rect, 160, 160, function() return 0 end, function() return true end, 1) end
+  local st = CV._state
+  T.check(#st.motes > 10, "dust motes drift in the air (" .. #st.motes .. ")")
+  local near = 0
+  for _, m in ipairs(st.motes) do if math.abs(m.x - 160) < 120 then near = near + 1 end end
+  T.check(near * 2 > #st.motes, "most of them near the player")
+  local landed = false
+  for _ = 1, 600 do
+    CV.update(1 / 60, rect, 160, 160, function() return 0 end, function() return true end, 1)
+    for _, r in ipairs(st.rings) do if r.size == 9 then landed = true end end
+  end
+  T.check(landed, "a drop lands on water and spreads a ring")
+  local v, n = CV.build()
+  T.check(n > 0 and n % 4 == 0, "it all builds into quads")
+  CV.reset()
 end
 
 do

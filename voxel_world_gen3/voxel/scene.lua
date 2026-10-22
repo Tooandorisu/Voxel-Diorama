@@ -133,6 +133,7 @@ uniform Image uLight;    // baked light: r = sun, g = ambient occlusion
 uniform vec4 uLightRect; // world origin xy, size zw of the bake
 uniform vec3 uShadow;    // colour a fully shadowed top is multiplied by
 uniform vec4 uDark;      // dark cave: Flash circle centre xy (mesh space), radius, on
+uniform float uDarkWarm; // the Flash light warm like a torch (0 = plain)
 uniform vec3 uTint;      // time of day: the colour everything is lit with
 uniform float uDesat;    // ...and how much colour is washed out first (moonlight)
 uniform float uTime;     // seconds, for the water's ripple
@@ -325,6 +326,14 @@ vec4 effect(vec4 color, Image unused, vec2 tc, vec2 sc) {
   // lit area is a clean circle on the ground with whole walls inside it.
   vec2 dd = vWorld - uDark.xy;
   rgb *= 1.0 - uDark.w * step(uDark.z * uDark.z, dot(dd, dd));
+  // ...and inside it the Flash light is warm, like a torch: golden toward
+  // its rim and dimming there, breathing a little
+  if (uDark.w > 0.0 && uDarkWarm > 0.0) {
+    float e = clamp(length(dd) / max(1.0, uDark.z), 0.0, 1.0);
+    float fl = 1.0 + 0.035 * sin(uTime * 7.3) + 0.025 * sin(uTime * 13.1 + 1.7);
+    vec3 warm = mix(vec3(1.06, 1.0, 0.9), vec3(1.18, 0.84, 0.52), smoothstep(0.25, 1.0, e));
+    rgb *= mix(vec3(1.0), warm * (1.0 - 0.3 * smoothstep(0.55, 1.0, e)) * fl, uDarkWarm);
+  }
   return vec4(rgb, c.a * alphaMul);
 }
 #endif
@@ -669,6 +678,16 @@ function Scene.setSmoke(cv, cn, ci, cni, pv, pn, pi, pni)
   fill("puffs", pv, pn or 0, pi, pni)
 end
 
+function Scene.count(name)
+  local m = meshes[name]
+  return m and m.count or 0
+end
+
+-- cave dust and drips (caves.lua): soft glows drawn over the scene
+function Scene.setCaveFx(v, n, idx, ni)
+  fill("cavefx", v, n or 0, idx, ni)
+end
+
 function Scene.setCritters(gv, gn, gi, gni, bv, bn, bi, bni)
   fill("flies", gv, gn or 0, gi, gni)
   fill("birds", bv, bn or 0, bi, bni)
@@ -864,6 +883,7 @@ function Scene.render(p)
   send("uFoam", 0)
   local dk = p.dark
   send("uDark", dk and { dk[1], dk[2], dk[3], 1 } or { 0, 0, 0, 0 })
+  send("uDarkWarm", (dk and p.warmFlash) and 1 or 0)
   send("uTint", p.tint or { 1, 1, 1 })
   send("uDesat", p.desat or 0)
   send("uNight", p.night or 0)
@@ -1093,6 +1113,20 @@ function Scene.render(p)
       drawMesh("flies")
       love.graphics.setBlendMode("alpha")
     end
+  end
+
+  -- cave dust and drips: blended over what is behind, in the cave's light
+  -- (the Flash darkness falls on them too)
+  if (meshes.cavefx and meshes.cavefx.count or 0) > 0 then
+    love.graphics.setDepthMode("lequal", false)
+    send("uTex", glowTexture())
+    send("uOrigin", { 0, 0 })
+    send("uSize", { 16, 16 })
+    send("uCutout", -1)
+    send("uTint", { 1, 1, 1 })
+    send("uDesat", 0)
+    love.graphics.setBlendMode("alpha")
+    drawMesh("cavefx")
   end
 
   -- engine OAM layer (emotes, field-move sprites): always on top, untinted

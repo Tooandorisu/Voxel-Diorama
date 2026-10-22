@@ -37,6 +37,7 @@ voxels.
 | FOOTPRINTS | on / off | prints in sand (NPCs too), in Route 113's ash, and wet prints out of puddles |
 | CLOUDS & STARS | on / off | cloud shadows drift over the land by day, clouds cross the sky, stars come out at night |
 | WAVES & FOAM | on / off | foam along shores, waves rolling in, a wake behind you when surfing |
+| CAVE ATMOSPHERE | on / off | dust in the air and dripping water in caves; the Flash circle glows warm like a torch |
 | CAMERA TURN | LEFT 30 / LEFT 15 / STRAIGHT / RIGHT 15 / RIGHT 30 | look at the diorama from an angle, to see behind houses; key 7 cycles it |
 | 3D WEATHER | on / off | rain, snow and volcanic ash fall through the 3D scene, behind and in front of buildings, instead of being painted over the map; rain darkens the light, thunderstorms flash |
 | DAY/NIGHT | GAME CLOCK / DEVICE CLOCK / OFF | outdoors, the light follows the time of day: morning and evening sun from the side with long shadows, warm sunsets, blue nights with no shadows. GAME CLOCK uses the clock you set in Ruby/Sapphire/Emerald (FireRed/LeafGreen have none and use the device clock) |
