@@ -169,6 +169,7 @@ function Cells.provider()
     -- the object outline in a cell's tile (tiles.lua): nil / false when
     -- the tileset cannot tell
     shape = function(info) return info and Tiles.shape(info.pair, info.mid) end,
+    over = function(info) return info and Tiles.overCount(info.pair, info.mid) end,
     family = frlg and "frlg" or "rse",
   }
 end
