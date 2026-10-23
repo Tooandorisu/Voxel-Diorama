@@ -30,6 +30,13 @@ HF.WATER = -6
 HF.PER = HF.CELL / HF.VOXEL -- voxels per cell edge
 
 local CELL, VOXEL, PER = HF.CELL, HF.VOXEL, HF.PER
+-- Runs are measured this many cells past the build window: what a run is
+-- (rock, trees, a narrow wall, a tower) is judged over all of it, and a
+-- run cut off nearer changed its verdict -- and its height -- as the
+-- window slid over it.  (A dozen was too few: Rock Tunnel's walls and the
+-- Safari Zone's tree lines are longer than the screen.)
+local RUNX = 40
+local RAMP = 12 * CELL
 
 local floor, max, min = math.floor, math.max, math.min
 
@@ -72,6 +79,9 @@ end
 
 HF._tileRock = {} -- [pair:mid] = rock-coloured (forest pattern test)
 HF._rockMem = {}  -- [pair:mid] = rock by its art (rockCell), once seen
+HF._roomMem = {}  -- [map] = an interior's back wall depth, once seen
+HF._borderWater = {} -- [pair:mid] = a border tile is sea, once seen
+HF._leafMem = {}  -- [pair:mid] = foliage by its art, once seen
 
 local function isFoliageColor(r, g, b)
   -- leafy greens and the dark blue-greens FRLG uses for tree shadow
@@ -222,8 +232,18 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     if k then return k end
     k = "solid"
     if c.border then
+      -- (remembered per tile: the border's art is only there on screen,
+      -- and an island's sea border was water or a wall around the island
+      -- depending on where you stood)
       local st = cellStats(cx, cy)
-      if st and isWaterColor(st) then k = "water" end
+      local mkey = c.mid ~= nil and (tostring(c.pair) .. ":" .. tostring(c.mid)) or nil
+      if st then
+        local w = isWaterColor(st) and true or false
+        if mkey then HF._borderWater[mkey] = w end
+        if w then k = "water" end
+      elseif mkey and HF._borderWater[mkey] then
+        k = "water"
+      end
       -- a sliver between two maps' edges, beyond both: the current map's
       -- border tile fills it (a forest, for Rustboro) -- out in the sea
       -- west of Route 115 it stood as a tall dark wall until you crossed
@@ -294,8 +314,14 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- foliage test over a cell's art (centre-ish samples)
   -- true / false, or nil when the cell's art is not available (outside
   -- the captured view) and it should not vote either way
+  -- (remembered per tile, like rock below: Emerald's forests have no art
+  -- past the screen, and judged only by what was on screen a forest stood
+  -- as trees from one spot and as a four-storey block from the next)
+  local leafMem = HF._leafMem
   local function foliageCell(cx, cy)
     if not color then return nil end
+    local c0 = at(cx, cy)
+    local mkey = c0 and c0.mid ~= nil and (tostring(c0.pair or c0.map) .. ":" .. tostring(c0.mid)) or nil
     local hits, seen = 0, 0
     for i = 0, 3 do
       local sx = cx * CELL + 2 + (i % 2) * 11
@@ -306,12 +332,17 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         if isFoliageColor(r, g, b) then hits = hits + 1 end
       end
     end
-    if seen < 3 then return nil end
+    if seen < 3 then
+      if mkey then return leafMem[mkey] end
+      return nil
+    end
     -- the cell as a whole must lean green too: a brown rock mound whose
     -- corners show the grass or forest around it is not foliage
     local st = cellStats(cx, cy)
-    if st and not (st.g > st.r * 1.02) then return false end
-    return hits >= 3
+    local v = hits >= 3
+    if st and not (st.g > st.r * 1.02) then v = false end
+    if mkey then leafMem[mkey] = v end
+    return v
   end
 
   -- Rock by its art -- remembered per tile.  The map's picture is only
@@ -321,8 +352,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- "buildings glitching while moving").  A tile judged rock once, on
   -- screen, is rock everywhere and every time after.
   local tileRockMem = HF._rockMem
-  local function rockCell(cx, cy)
+  -- (nil: no art for it on hand, and never judged)
+  local function rockKnown(cx, cy)
     local c = at(cx, cy)
+    if c and c.cliff then return true end
     local key = c and c.mid ~= nil and (tostring(c.pair) .. ":" .. tostring(c.mid)) or nil
     if color then
       local hits, seen = 0, 0
@@ -342,7 +375,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       end
     end
     if key and tileRockMem[key] ~= nil then return tileRockMem[key] end
-    return false
+    return nil
+  end
+  local function rockCell(cx, cy)
+    return rockKnown(cx, cy) or false
   end
 
   local function relief(wx, wy, lo, hi)
@@ -473,41 +509,54 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- drifts out of step with the art on long forest columns (the top art is
   -- squeezed to fit), putting a dip through the middle of a tree and one
   -- tree's tip on the next one's crown.  nil when the art is not on hand.
-  local function crownGaps(cx, ytop, ybottom, kk, cc)
+  local function crownGaps(cx, ytop, ybottom, kc)
     if not color or not roundP or roundP.gap == 0 then return nil end
     local ry0 = max(ytop, y0) * PER
     local ry1 = (min(ybottom, y0 + rows - 1) + 1) * PER - 1
-    local lum, sum, n = {}, 0, 0
-    for ry = ry0, ry1 do
-      local v = kk * (ry * VOXEL + 2) + cc
+    -- read a little past the screen rows too, and judge each row against
+    -- the rows around it, not the whole stretch on screen: what is on
+    -- screen changes as you walk, and the gaps moved with it
+    local NEAR = 2 * PER
+    local sr0, sr1 = max(ytop * PER, ry0 - 2 * NEAR), min((ybottom + 1) * PER - 1, ry1 + 2 * NEAR)
+    local lum, n = {}, 0
+    for ry = sr0, sr1 do
+      local wy = ry * VOXEL + 2
+      local k, c = kc(wy)
+      local v = k * wy + c
       local acc, m = 0, 0
       for i = 0, PER - 1 do
         local r, g, b = color(cx * CELL + i * VOXEL + 2, v)
         if r then acc, m = acc + luminance(r, g, b), m + 1 end
       end
-      if m == 0 then return nil end
-      lum[ry] = acc / m
-      sum, n = sum + lum[ry], n + 1
+      if m > 0 then lum[ry] = acc / m; n = n + 1 end
     end
     if n < 3 then return nil end
-    local mean = sum / n
-    local drop = {}
-    local last = nil -- (rows can be any number: maps west/north of the
-                     -- current one have negative coordinates)
-    for ry = ry0 + 1, ry1 - 1 do
-      local l = lum[ry]
-      if l <= lum[ry - 1] and l <= lum[ry + 1] and l < mean - 0.04 then
-        if last == nil or ry - last >= 3 then
-          drop[ry] = roundP.gap
-          last = ry
-        elseif l < lum[last] then
-          drop[last] = nil
-          drop[ry] = roundP.gap
-          last = ry
-        end
+    local function near(ry)
+      local sum, m = 0, 0
+      for r = ry - NEAR, ry + NEAR do
+        local l = lum[r]
+        if l then sum, m = sum + l, m + 1 end
       end
+      return sum / m
     end
-    if next(drop) == nil then return nil end
+    -- a gap is a dark row, darker than the rows around it, and the darkest
+    -- within two rows (ties: the upper one) -- decided by its neighbours
+    -- alone, not by where the scan started (rows can be any number: maps
+    -- west/north of the current one have negative coordinates)
+    local cand = {}
+    for ry = max(sr0 + 1, ry0 - 5), min(sr1 - 1, ry1 + 5) do
+      local l, a, b = lum[ry], lum[ry - 1], lum[ry + 1]
+      if l and a and b and l <= a and l <= b and l < near(ry) - 0.04 then cand[ry] = l end
+    end
+    local drop = {}
+    for ry, l in pairs(cand) do
+      local keep = true
+      for r = ry - 2, ry + 2 do
+        local o = cand[r]
+        if r ~= ry and o and (o < l or (o == l and r < ry)) then keep = false break end
+      end
+      if keep then drop[ry] = roundP.gap end
+    end
     -- soften either side, and round off the run's two ends
     local out = {}
     for ry, d in pairs(drop) do
@@ -522,7 +571,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       local e = (ybottom + 1) * PER - 1
       out[e] = math.max(out[e] or 0, roundP.gap)
     end
-    return out
+    return out, drop
   end
 
   -- a tree or its canopy (a forest continues there)
@@ -549,21 +598,50 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- fill: one continuous canopy (Ruby/Sapphire/Emerald forests, whose art
   -- draws every tree as a round crown on teal -- domed one by one they read
   -- as a pegboard): rounded only where the forest ends, not between trees
-  local function stamp(cx, ytop, ybottom, h, foliage, walk, lo, hi, dome, fill, leafy)
+  local function stamp(cx, ytop, ybottom, h, foliage, walk, lo, hi, dome, fill, leafy, clipT, clipB)
     lo, hi = lo or -4, hi or 4
+    -- where the two-cell trees start: from the run's real end (a run cut
+    -- off by the build window pairs from the end that is really there, so
+    -- the pairing does not shift as you walk)
+    local pbase = ytop
+    if clipT and clipB then pbase = 0 elseif clipT then pbase = ybottom - 1 end
     local Y0, Y1 = ytop * CELL, (ybottom + 1) * CELL
     local len = Y1 - Y0
-    local kk = max(len - h, VOXEL) / len
-    local cc = (Y1 - h) - kk * Y1
+    -- The art is read lifted by the run's height: its top end maps to
+    -- itself, everything from RAMP below it to h higher.  (Squashed over
+    -- the whole run, a long forest read different art at every step: the
+    -- run is cut off by the build window, and its length changed as you
+    -- walked.  Within RAMP of the top a run's length is its own.)
+    local R = min(len, RAMP)
+    local kA = max(R - h, VOXEL) / R
+    local cA = (Y0 + R - h) - kA * (Y0 + R)
+    local YR = Y0 + R
+    local function kc(wy)
+      if wy < YR then return kA, cA end
+      return 1, -h
+    end
     local maxDrop = floor(h * 0.6 / 2) * 2
-    local gaps = dome and not fill and crownGaps(cx, ytop, ybottom, kk, cc) or nil
+    -- (the gaps shape the crown only near a gap the art shows: a whole
+    -- column switching between the two whenever a gap came into view
+    -- reshaped Rock Tunnel's walls at every step)
+    local gaps, gdrop
+    if dome and not fill then gaps, gdrop = crownGaps(cx, ytop, ybottom, kc) end
+    local function gapRow(cy)
+      if not gdrop then return false end
+      for r = cy * PER - 6, (cy + 1) * PER + 5 do
+        if gdrop[r] then return true end
+      end
+      return false
+    end
     local openN = fill and not leafyAt(cx, ytop - 1)
     local openS = fill and not leafyAt(cx, ybottom + 1)
     for cy = max(ytop, y0), min(ybottom, y0 + rows - 1) do
       local w = walk and walk[cy] or nil
+      local kk, cc = kc(cy * CELL)
+      local useGaps = gaps and gapRow(cy)
       -- where this cell sits in its two-cell tree (an odd last cell is a
       -- tree of its own)
-      local p = (cy - ytop) % 2
+      local p = (cy - pbase) % 2
       local single = p == 0 and cy == ybottom
       for j = 0, PER - 1 do
         local wy = cy * CELL + j * VOXEL
@@ -587,7 +665,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
                 dx = 0
                 if i == 0 and not leafyAt(cx - 1, cy) then dx = ROUND_X[1] end
                 if i == PER - 1 and not leafyAt(cx + 1, cy) then dx = ROUND_X[PER] end
-              elseif gaps then
+              elseif useGaps then
                 dy = gaps[cy * PER + j] or 0
               else
                 dy = single and ROUND_Y1[j + 1] or ROUND_Y2[p * PER + j + 1]
@@ -961,9 +1039,53 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         -- the house would come out roof / tree / roof / tree).
         local isTree = function(y) local c = at(cx, y) return c ~= nil and c.tree == true end
         local kindTree = isTree(cy)
-        while top - 1 >= y0 - 12 and struct(cx, top - 1) and isTree(top - 1) == kindTree do top = top - 1 end
+        -- (the map and the border tiling past its edge stay one run: split,
+        -- the sliver of border between two maps' edges -- Petalburg's and
+        -- Route 104's -- stood on its own as a flat strip through the
+        -- forest)
+        local isBorder = function(y) local c = at(cx, y) return c ~= nil and c.border == true end
+        local kindBorder = isBorder(cy)
+        -- A building set into a hillside (Lavender Town's Poke Center) is
+        -- not part of the hill: a run going down from rock into a
+        -- building's facade -- not rock, with a door below it -- stops at
+        -- the rock.  As one run, the Center took the hill's depth, and one
+        -- of its columns stood up as a long strip of roof running back
+        -- into the rock.
+        local function doorBelow(y)
+          for dy = 0, 7 do
+            for dx = -3, 3 do
+              local c = at(cx + dx, y + dy)
+              -- (FRLG's house doors are walkable cells with the door
+              -- behaviour, not the door collision; Pokemon Tower's door is
+              -- the kind without animation, like a cave's)
+              if c and (c.kind == "door" or c.warpDoor or c.caveDoor) then return true end
+            end
+          end
+          return false
+        end
+        local function hillEdge(y) -- rock at y, the building's facade below it
+          -- (or the forest behind it: Emerald's trees are known only by
+          -- their art, and Route 104's flower shop and the trees behind it
+          -- were one run -- trees from one spot, a green tower from another)
+          if kindTree then return false end
+          if rockCell(cx, y) and not rockCell(cx, y + 1) and doorBelow(y + 1) then return true end
+          -- a forest standing on a cliff (Route 119): the trees are trees,
+          -- the cliff rock -- as one run the whole of it was either
+          if foliageCell(cx, y) == true and foliageCell(cx, y - 1) == true
+              and foliageCell(cx, y + 1) ~= true and rockKnown(cx, y + 1) == true and rockKnown(cx, y + 2) == true then
+            return true
+          end
+          return foliageCell(cx, y) == true and foliageCell(cx, y - 1) == true
+            and foliageCell(cx, y + 1) == false and foliageCell(cx, y + 2) == false and doorBelow(y + 1)
+        end
+        while top - 1 >= y0 - RUNX and struct(cx, top - 1) and isTree(top - 1) == kindTree
+            and not hillEdge(top - 1) do
+          top = top - 1
+        end
         local bottom = cy
-        while bottom + 1 <= y0 + rows + 12 and struct(cx, bottom + 1) and isTree(bottom + 1) == kindTree do
+        while bottom + 1 <= y0 + rows + RUNX and struct(cx, bottom + 1) and isTree(bottom + 1) == kindTree
+            do
+          if hillEdge(bottom) then break end
           bottom = bottom + 1
         end
         -- One building, one mapping.  RSE houses leave some top cells
@@ -980,7 +1102,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           end
           local function topOf(nx)
             local t = bottom
-            while t - 1 >= y0 - 12 and struct(nx, t - 1) and not isTreeAt(nx, t - 1) do t = t - 1 end
+            while t - 1 >= y0 - RUNX and struct(nx, t - 1) and not isTreeAt(nx, t - 1) do t = t - 1 end
             return t
           end
           local best = top
@@ -1028,6 +1150,15 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           walk = { [top] = true }
         end
         local cells = bottom - top + 1
+        -- a mountain running on into the border past the map's edge is as
+        -- deep as both together
+        local span = cells
+        if not kindBorder then
+          local y = top - 1
+          while span < 6 and struct(cx, y) and isBorder(y) do span, y = span + 1, y - 1 end
+          y = bottom + 1
+          while span < 6 and struct(cx, y) and isBorder(y) do span, y = span + 1, y + 1 end
+        end
         local foliage = tree
         if not foliage then
           -- judged by the cells nearest the front (on screen, like rock),
@@ -1037,9 +1168,18 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           -- the bottom of the view -- the wall of trees around a town -- has
           -- none in its last rows, and with no votes it stood as a plain
           -- block instead of trees)
+          -- (the border tiling past the map's edge votes only when no map
+          -- cell can: whether its art is on hand depends on where you stand)
+          local mapVotes = false
+          for y = top, bottom do
+            local c = at(cx, y)
+            if c and not c.border and foliageCell(cx, y) ~= nil then mapVotes = true break end
+          end
           local hits, votes = 0, 0
           for y = bottom, top, -1 do
-            local f = foliageCell(cx, y)
+            local c = at(cx, y)
+            local f = nil
+            if not (mapVotes and c and c.border) then f = foliageCell(cx, y) end
             if f ~= nil then
               votes = votes + 1
               if f then hits = hits + 1 end
@@ -1053,10 +1193,14 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         -- The whole mound counts, not only the columns beside the mouth:
         -- walk sideways along the block (through solid cells) looking for it.
         local caveMound = false
+        -- (a mouth with rock right above it: Pokemon Tower's door, the
+        -- same kind without animation, has its slate facade above, and the
+        -- cliffs beside the tower sank to a cave mound's 16 px)
         local function caveIn(x)
           for y = top, bottom + 1 do
             local c = at(x, y)
-            if isCaveMouth(c) then return true end
+            if isCaveMouth(c) and (not color or rockCell(x, y - 1) or rockCell(x, y - 2)
+                or not cellStats(x, y - 1)) then return true end
           end
           return false
         end
@@ -1107,7 +1251,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
             local st = cellStats(mx, y)
             if st then
               n = n + 1
-              if rockCell(mx, y) or isRockColor(st.r, st.g, st.b) or (st.r + st.g + st.b) < 0.6 then rocky = rocky + 1 end
+              -- (dark counts only at the mouth itself: Pokemon Tower's dark
+              -- slate facade, a door without animation at its foot, passed
+              -- for a cave mound and its door column sank to 16 px)
+              if rockCell(mx, y) or isRockColor(st.r, st.g, st.b) or (y >= bottom - 1 and (st.r + st.g + st.b) < 0.6) then rocky = rocky + 1 end
             end
           end
           if n > 0 and rocky * 2 < n then caveMound = false end
@@ -1155,23 +1302,79 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         if opts.cave and not narrow and not wet and not foliage and cells >= 3 then
           -- in a cave every solid mass is the cave's rock wall
           rock = true
-        elseif not narrow and not wet and not foliage and opts.rock and HF.rockHeight(cells) then
-          -- judge by the cells nearest the front, which are on screen
+        elseif not narrow and not wet and not foliage and opts.rock and HF.rockHeight(span) then
+          -- judge by the six southernmost cells that can be judged (a
+          -- mountain running off the bottom of the view has no art in its
+          -- last rows: judged by those, Cape Brink's cliffs were rock or
+          -- houses depending on where you stood)
+          -- (the border tiling past the map's edge votes only when nothing
+          -- else can: it is the same wall wherever you stand, and its
+          -- verdict flipped the mountain it runs into)
           local hits, n = 0, 0
-          for y = math.max(top, bottom - 5), bottom do
-            n = n + 1
-            if rockCell(cx, y) then hits = hits + 1 end
+          local anyMap = false
+          for y = top, bottom do
+            local c = at(cx, y)
+            if c and not c.border and rockKnown(cx, y) ~= nil then anyMap = true break end
+          end
+          for y = bottom, top, -1 do
+            local c = at(cx, y)
+            local v = nil
+            if not (anyMap and c and c.border) then v = rockKnown(cx, y) end
+            if v ~= nil then
+              n = n + 1
+              if v then hits = hits + 1 end
+              if n >= 6 then break end
+            end
           end
           rock = hits * 2 > n
         end
         -- cave walls stand one storey and a half: the art already draws the
         -- cliff face, and at mountain height it stretched into long teeth
-        local base = rock and (opts.cave and 24 or (HF.rockHeight(cells) or HF.rockHeight(6))) or HF.runHeight((narrow or wet) and 1 or cells, foliage)
+        local base = rock and (opts.cave and 24 or (HF.rockHeight(span) or HF.rockHeight(6))) or HF.runHeight((narrow or wet) and 1 or cells, foliage)
         -- every column of a cave mound stands equally tall and low (16px, so
         -- its art is barely stretched and reads like the flat game): the column
         -- over the mouth is a cell shorter (the mouth is walkable), which
         -- left it a storey lower than its neighbours
         if caveMound then base = 16 end
+        -- A tall building -- seven cells deep or more, with a door in its
+        -- front (Lavender Tower, Silph Co., the Celadon store) -- is drawn
+        -- several storeys high: at the two-storey cap it stood lower than
+        -- the hills around it, sunk into the mountain.
+        if not rock and not foliage and not tree and not narrow and not wet and not caveMound
+            and cells >= 7 and not opts.indoor and not opts.cave then
+          local function isBorder2(x, y) local c = at(x, y) return c ~= nil and c.border == true end
+          local door = false
+          for dx = -3, 3 do
+            for y = bottom - 1, bottom + 1 do
+              local c = at(cx + dx, y)
+              if c and (c.kind == "door" or c.warpDoor or c.caveDoor) then
+                -- (not a door in a front judged rock: One Island's Poke
+                -- Center reads as rock, and the plain columns at its sides
+                -- stood up as two four-storey posts)
+                local hits, n = 0, 0
+                for yy = y - 1, y - 6, -1 do
+                  local v = rockKnown(cx + dx, yy)
+                  local st = cellStats(cx + dx, yy)
+                  if st and isRockColor(st.r, st.g, st.b) then v = true end
+                  if v ~= nil then n = n + 1; if v then hits = hits + 1 end end
+                end
+                -- (and the building as deep at its door: the corner pieces
+                -- of a Poke Center's front reach a cell further down)
+                local d, yy = 0, y
+                while struct(cx + dx, yy) and not isBorder2(cx + dx, yy) and d < 12 do d, yy = d + 1, yy - 1 end
+                if not (n > 0 and hits * 2 > n) and d >= 7 then door = true end
+              end
+            end
+          end
+          -- (the hill behind a building is split off it -- hillEdge -- so a
+          -- grey facade, like the Celadon store's middle, is no hill)
+          -- (nor a forest standing behind a house: Emerald's trees are known
+          -- only by their art, and the trees behind Route 104's flower shop
+          -- joined it into one nine-cell run -- a green tower)
+          local leafy = 0
+          for y = top, bottom do if foliageCell(cx, y) == true then leafy = leafy + 1 end end
+          if door and leafy < 2 then base = 64 end
+        end
         -- A small free-standing thing -- a fountain, a statue, a well: no
         -- more than three cells wide or deep, standing on its own -- is not
         -- a building.  Knee-to-shoulder high, no roof, and cut out of the
@@ -1238,7 +1441,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
               if c and c.artTree then artRun = true break end
             end
           end
-          stamp(cx, top, bottom, h, foliage, walk, nil, nil, round and foliage, artRun, foliage and not caveMound)
+          local clipT, clipB = top <= y0 - RUNX, bottom >= y0 + rows + RUNX
+          stamp(cx, top, bottom, h, foliage, walk, nil, nil, round and foliage, artRun, foliage and not caveMound,
+            clipT, clipB)
           -- a cave mound is a plain block with its art on top: flattening
           -- parts of it by colour, or slanting its walls like rock, cut it
           -- into tall slivers (the "spires")
@@ -1774,8 +1979,11 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
     local function solidThing(cx, cy)
       local c = at(cx, cy)
-      -- (kindOf: an impassable cell of the very floor tile beside it is floor)
-      return c ~= nil and c.kind == "solid" and not c.tree and kindOf(cx, cy) == "solid" and not isVoid(cx, cy)
+      -- (kindOf: an impassable cell of the very floor tile beside it is floor;
+      -- a staircase is floor too: the player arrives standing on it, and
+      -- inside a wall-high box vanished)
+      return c ~= nil and c.kind == "solid" and not c.tree and not c.warpTile
+        and kindOf(cx, cy) == "solid" and not isVoid(cx, cy)
     end
     local X1, Y1r = x0 + cols - 1, y0 + rows - 1
     -- back wall: per column, the first solid band under the void
@@ -1843,6 +2051,18 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       local d = ends[cx] - b.top + 1
       depthCount[d] = (depthCount[d] or 0) + 1
       if depthCount[d] > nd then depth, nd = d, depthCount[d] end
+    end
+    -- (remembered per map: a big interior -- the Pokemon Mansion, the S.S.
+    -- Anne -- shows a different stretch of back wall at every step, and
+    -- its walls changed height as you walked)
+    do
+      local mc = at(x0 + floor(cols / 2), y0 + floor(rows / 2))
+      local mk = mc and mc.map
+      if mk then
+        local mem = HF._roomMem[mk]
+        if mem then depth = mem
+        elseif nd >= 3 then HF._roomMem[mk] = depth end
+      end
     end
     -- (a storey above its art: the room reads as a box you look into, the
     -- extra height its art's top row held -- see CAP)
@@ -2015,15 +2235,16 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         end
       end
     end
-    -- the floor lies flat
+    -- the floor lies flat (a staircase with it)
     for cy = y0, Y1r do
       for cx = x0, X1 do
         local c = at(cx, cy)
-        if c and (c.kind == "ground" or c.kind == "door") and not role[key(cx, cy)] then
+        if c and (c.kind == "ground" or c.kind == "door" or c.warpTile) and not role[key(cx, cy)] then
           for j = 0, PER - 1 do
             for i = 0, PER - 1 do
               local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
-              if (H[k] or 0) > 0 and (S[k] or 0) < 16 then
+              if (H[k] or 0) > 0 and ((S[k] or 0) < 16 or c.warpTile or c.kind == "door") then
+                grid.CAP[k], grid.U[k] = nil, nil
                 H[k], S[k], K[k], C[k], L[k] = 0, 0, 1, 0, 1
                 W[k], R[k], F[k] = nil, nil, nil
               end
