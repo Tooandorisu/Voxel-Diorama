@@ -150,6 +150,12 @@ function Tiles.pixel(pair, mid, x, y)
   if slot == nil or not (data and ts.cols) then return nil end
   local px, py = (slot % ts.cols) * 16 + x, floor(slot / ts.cols) * 16 + y
   local r, g, b, a = data:getPixel(px, py)
+  -- (a COVERED metatile keeps its top layer in the middle image: tree
+  -- crowns over the teal ground between them in RSE forests)
+  if ts.midImageData then
+    local r1, g1, b1, a1 = ts.midImageData:getPixel(px, py)
+    if a1 and a1 > 0.5 then r, g, b, a = r1, g1, b1, 1 end
+  end
   if ts.overImageData then
     local r2, g2, b2, a2 = ts.overImageData:getPixel(px, py)
     if a2 and a2 > 0.5 then r, g, b, a = r2, g2, b2, 1 end

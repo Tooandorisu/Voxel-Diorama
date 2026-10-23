@@ -35,6 +35,11 @@ local FRLG_TREE = {
 }
 for mid = 0x014, 0x01F do FRLG_TREE[mid] = true end
 for mid = 0x024, 0x027 do FRLG_TREE[mid] = true end
+local FRLG_CLIFF = {
+  [0x070] = true, [0x071] = true, [0x072] = true, [0x073] = true,
+  [0x075] = true, [0x07A] = true, [0x07B] = true, [0x07C] = true, [0x07D] = true,
+  [0x0B2] = true, [0x0B3] = true, [0x0B4] = true, [0x0B5] = true,
+}
 
 local function familyName()
   local Family = Engine.get("src.import.gba.family")
@@ -80,6 +85,7 @@ function Cells.provider()
     if ok and type(v) == "number" then GYM_DOOR = v end
   end
   local world = Map.world or {}
+  local indoorDef = def and (def.kind == "indoor" or tonumber(def.mapType) == 8 or tonumber(def.mapType) == 9)
 
   local function locate(cx, cy)
     local w, h = layout.trueWidth or layout.width, layout.trueHeight or layout.height
@@ -147,11 +153,29 @@ function Cells.provider()
       if ok then info.elev = e end
     end
     -- any cell: a cave mouth may not carry a door collision at all
+    -- indoors, a solid cell may be a staircase (the player arrives on it
+    -- and walks into it to leave): the room pass keeps it low
+    -- outdoors, a solid cell may be a building's door (Lavender Town's
+    -- Poke Center door is drawn with collision on it): known as a door, so
+    -- the building is told from the hill behind it
+    if kind == "solid" and L and Coll and Coll.behaviorOn then
+      local ok, beh = pcall(Coll.behaviorOn, d, nx, ny)
+      if ok and type(beh) == "number" then
+        if indoorDef and beh >= 0x62 and beh <= 0x6F then info.warpTile = true end
+        if not indoorDef and (beh == WARP_DOOR or beh == GYM_DOOR) then info.warpDoor = true end
+      end
+    end
     if kind ~= "solid" and L and Coll and Coll.behaviorOn then
       local ok, beh = pcall(Coll.behaviorOn, d, nx, ny)
       if ok and beh ~= nil then info.behKnown = true; info.beh = beh end
       if ok and beh == CAVE_DOOR then info.caveDoor = true end
       if ok and beh ~= nil and (beh == WARP_DOOR or beh == GYM_DOOR) then info.warpDoor = true end
+    end
+    -- FRLG's cliff and rock-face tiles (collision_frlg.lua CLIFF_MIDS):
+    -- rock, whatever their colour (a dark cliff edge above Lavender's Poke
+    -- Center passed for part of the building)
+    if frlg and kind == "solid" and (d and d.kind) ~= "indoor" and mid and mid < 640 and FRLG_CLIFF[mid] then
+      info.cliff = true
     end
     if frlg and (d and d.kind) ~= "indoor" and mid and mid < 640 and FRLG_TREE[mid] then
       if kind == "solid" then info.tree = true else info.canopy = true end

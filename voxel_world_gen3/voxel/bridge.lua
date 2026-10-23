@@ -890,7 +890,20 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
   -- GPU->CPU copy (a full-size read stalled phones on every rebuild).
   local data
   local W, H = p.W, p.H
-  local qw, qh = math.ceil(W / 4), math.ceil(H / 4)
+  local qw, qh = math.ceil(W / 4) + 1, math.ceil(H / 4) + 1
+  local gx, gy = p.camX, p.camY
+  -- Each probe texel is one 4x4 block of the WORLD, not of the capture:
+  -- the capture follows the camera pixel by pixel, and sampled at its own
+  -- 4x4 blocks the pixel each block was read at moved with every step --
+  -- a tree's crown, a cliff's edge came out a little different each
+  -- rebuild while walking (the "changing shapes").  Shifted by the
+  -- camera's offset within its 4 px block, the same world pixel is read
+  -- every time.
+  -- (Every game: building every Emerald and Ruby/Sapphire map from many
+  -- places along a walk showed their forests and cliffs changing just
+  -- the same -- thousands of cells -- with the screen's own blocks.)
+  local g4x, g4y = math.floor(gx / 4) * 4, math.floor(gy / 4) * 4
+  local rx, ry = gx - g4x, gy - g4y
   local okD, d = pcall(function()
     local probe = ensure("probe", qw, qh)
     love.graphics.push("all")
@@ -898,19 +911,29 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
     love.graphics.origin()
     love.graphics.setShader()
     love.graphics.setBlendMode("replace")
+    love.graphics.setColor(0, 0, 0, 0)
+    love.graphics.rectangle("fill", 0, 0, qw, qh)
     love.graphics.setColor(1, 1, 1, 1)
-    -- nearest filter: each probe texel centre lands on its 4x4 block's centre
-    love.graphics.draw(state.ground, 0, 0, 0, 0.25, 0.25)
+    -- nearest filter: each probe texel centre lands on the centre of its
+    -- world block's pixel (2, 2) -- the middle of that pixel, not its
+    -- corner: on the corner the GPU picked the pixel to either side, column
+    -- by column as the camera's offset changed, and in Emerald's forests
+    -- (whose trees have grass at their corners) stripes of trees a few
+    -- columns wide lost their crowns and showed the grass, coming and
+    -- going as you walked
+    love.graphics.draw(state.ground, (rx - 0.5) / 4, (ry - 0.5) / 4, 0, 0.25, 0.25)
     love.graphics.pop()
     return probe:newImageData()
   end)
   if okD then data = d end
-  local gx, gy = p.camX, p.camY
   local shot = nil
   if data then
     shot = function(wx, wy)
-      local ix, iy = math.floor((wx - gx) / 4), math.floor((wy - gy) / 4)
+      local ix, iy = math.floor((wx - g4x) / 4), math.floor((wy - g4y) / 4)
       if ix < 0 or iy < 0 or ix >= qw or iy >= qh then return nil end
+      -- (the pixel the texel was read at must lie inside the capture)
+      local sx, sy = g4x + ix * 4 + 2, g4y + iy * 4 + 2
+      if sx < gx or sy < gy or sx >= gx + W or sy >= gy + H then return nil end
       local r, g, b = data:getPixel(ix, iy)
       return r, g, b
     end
@@ -923,7 +946,10 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
   -- relief came and went, the scene changed shape as you walked.)  The
   -- capture is the fallback where a tileset is not resident.
   local color = shot
-  if settings.tileArt ~= false and provider.tilePixel then
+  -- (FireRed/LeafGreen only: Ruby/Sapphire/Emerald forests, built from
+  -- tileset art past the screen, stood as tall striped walls north of
+  -- Petalburg -- their crowns sit in a layer the screen shows differently)
+  if settings.tileArt ~= false and provider.tilePixel and provider.family == "frlg" then
     local cells, CELLW = {}, CELL
     state.artCheck = state.artCheck or {}
     local artCheck = state.artCheck
@@ -946,65 +972,91 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
       -- A first try trusted it blindly, and somewhere it did not match --
       -- a FireRed forest read as orange rock off screen and turned to
       -- forest as it came into view.
-      local lx, ly = math.floor(wx - cx * CELLW), math.floor(wy - cy * CELLW)
+      -- (the very pixel the capture reads for this world block: its
+      -- centre, so a cell coming into view keeps its art to the pixel)
+      local bx, by = math.floor(wx / 4) * 4 + 2, math.floor(wy / 4) * 4 + 2
+      local lx, ly = bx - cx * CELLW, by - cy * CELLW
+      -- Once a tileset is verified, its art is used everywhere, on screen
+      -- too: the screen mixes in characters, effects and animation frames
+      -- that come and go as you walk, so a cell judged from it near the
+      -- edge of a building (Viridian Gym's roof) came out one way, then
+      -- another.  The tileset's art is the same every time.
+      -- compare the capture's sample with the tileset's (for the verdict)
+      local function check(r, g, b)
+        if not (c and not c.border and c.pair) then return end
+        local ck = artCheck[c.pair]
+        if not ck then ck = { n = 0, ok = 0, sw = 0 }; artCheck[c.pair] = ck end
+        if ck.n >= 4000 then return end
+        -- (the quarter-size capture samples near, not exactly at, the
+        -- 4x4 block's centre: the best match within a pixel counts)
+        local d, ds, any = 9, 9, false
+        for oy = -1, 1 do
+          for ox = -1, 1 do
+            local qx, qy = lx + ox, ly + oy
+            if qx >= 0 and qy >= 0 and qx < 16 and qy < 16 then
+              local tr, tg, tb = tp(c, qx, qy)
+              if tr then
+                any = true
+                local e = math.abs(tr - r) + math.abs(tg - g) + math.abs(tb - b)
+                local es = math.abs(tb - r) + math.abs(tg - g) + math.abs(tr - b)
+                if e < d then d = e end
+                if es < ds then ds = es end
+              end
+            end
+          end
+        end
+        if any then
+          local all = artCheck._all
+          if not all then all = { n = 0, ok = 0, sw = 0 }; artCheck._all = all end
+          ck.n, all.n = ck.n + 1, all.n + 1
+          if d < 0.12 then ck.ok, all.ok = ck.ok + 1, all.ok + 1 end
+          if ds < 0.12 then ck.sw, all.sw = ck.sw + 1, all.sw + 1 end
+        end
+      end
+      -- a tileset is trusted once its own samples match (or, before it has
+      -- enough of its own, when all of them together do); one that was
+      -- checked and does not match never is
+      local function verdict()
+        if not (c and not c.border and c.pair) then return nil end
+        local ck = artCheck[c.pair]
+        if ck and ck.n >= 200 then
+          local swap = ck.sw > ck.ok
+          if (swap and ck.sw or ck.ok) / ck.n >= 0.8 then return swap and "swap" or "ok" end
+          return nil
+        end
+        local all = artCheck._all
+        if all and all.n >= 200 then
+          local swap = all.sw > all.ok
+          if (swap and all.sw or all.ok) / all.n >= 0.8 then return swap and "swap" or "ok", true end
+        end
+        return nil
+      end
+      local v, borrowed = verdict()
+      if v then
+        local r, g, b = tp(c, lx, ly)
+        if r then
+          nTile = nTile + 1
+          -- (still gathering this tileset's own samples where it shows)
+          if borrowed and shot then
+            local sr, sg, sb = shot(wx, wy)
+            if sr then check(sr, sg, sb) end
+          end
+          if v == "swap" then return b, g, r end
+          return r, g, b
+        end
+      end
       if shot then
         local r, g, b = shot(wx, wy)
         if r then
           nShot = nShot + 1
-          if c and not c.border and c.pair then
-            local ck = artCheck[c.pair]
-            if not ck then ck = { n = 0, ok = 0, sw = 0 }; artCheck[c.pair] = ck end
-            if ck.n < 4000 then
-              -- (the quarter-size capture samples near, not exactly at, the
-              -- 4x4 block's centre: the best match within a pixel counts)
-              local d, ds, any = 9, 9, false
-              for oy = -1, 1 do
-                for ox = -1, 1 do
-                  local qx, qy = lx + ox, ly + oy
-                  if qx >= 0 and qy >= 0 and qx < 16 and qy < 16 then
-                    local tr, tg, tb = tp(c, qx, qy)
-                    if tr then
-                      any = true
-                      local e = math.abs(tr - r) + math.abs(tg - g) + math.abs(tb - b)
-                      local es = math.abs(tb - r) + math.abs(tg - g) + math.abs(tr - b)
-                      if e < d then d = e end
-                      if es < ds then ds = es end
-                    end
-                  end
-                end
-              end
-              if any then
-                local all = artCheck._all
-                if not all then all = { n = 0, ok = 0, sw = 0 }; artCheck._all = all end
-                ck.n, all.n = ck.n + 1, all.n + 1
-                if d < 0.12 then ck.ok, all.ok = ck.ok + 1, all.ok + 1 end
-                if ds < 0.12 then ck.sw, all.sw = ck.sw + 1, all.sw + 1 end
-              end
-            end
-          end
+          check(r, g, b)
           return r, g, b
         end
       end
-      if c and not c.border and c.pair then
-        -- (a tileset not checked yet -- the next map's, a forest beyond the
-        -- screen -- goes by the verdict over all of them: the atlases are
-        -- all made the same way, and on a phone every one checked matched
-        -- 98-99%.  One that was checked and did not match is never used.)
-        local ck = artCheck[c.pair]
-        if not ck or ck.n < 200 then ck = artCheck._all end
-        if ck and ck.n >= 200 then
-          local swap = ck.sw > ck.ok
-          local good = (swap and ck.sw or ck.ok) / ck.n
-          if good >= 0.8 then
-            local r, g, b = tp(c, lx, ly)
-            if r then
-              nTile = nTile + 1
-              if swap then return b, g, r end
-              return r, g, b
-            end
-          end
-        end
-      end
+      -- (a tileset not checked yet -- the next map's, a forest beyond the
+      -- screen -- goes by the verdict over all of them, above: the atlases
+      -- are all made the same way, and on a phone every one checked matched
+      -- 98-100%.  One that was checked and did not match is never used.)
       return nil
     end
     state.artStats = function() return nTile, nShot end
@@ -1222,7 +1274,10 @@ function Bridge.renderPending(R)
       local cy = math.floor(a.y / CELL)
       inMesh = cy >= b.y0 + 1 and cy <= b.y1 - 1
     end
-    if lit and inMesh and not HF.insideAt(state.grid, a.x - (state.shiftX or 0), a.y - (state.shiftY or 0)) then
+    -- (indoors nobody walks through a facade: a character inside something
+    -- tall is on a staircase or in a doorway, and stays drawn)
+    if lit and inMesh and (not isOutdoor(provider.def)
+        or not HF.insideAt(state.grid, a.x - (state.shiftX or 0), a.y - (state.shiftY or 0))) then
       a.ground = HF.floorAt(state.grid, a.x - (state.shiftX or 0), a.y - (state.shiftY or 0))
       a.z = a.ground + lift
       if settings.sunShadows then
@@ -1443,6 +1498,15 @@ function Bridge.renderPending(R)
     local vx1, vy1, vx2, vy2 = Camera.visibleRect(cam, 40 * settings.heightScale, preset().view)
     local fy0 = state.focusY or 0
     local rect = { vx1, math.max(vy1, fy0 - 320), vx2, math.min(vy2, fy0 + 160) }
+    -- (and no further than the flat view captured for the ground: past it
+    -- the terrain fades into the sky's colour, and fireflies glowed over
+    -- the black below a tall phone's picture, under the touch buttons)
+    if p.camX and p.W then
+      rect[1] = math.max(rect[1], p.camX + 8)
+      rect[2] = math.max(rect[2], p.camY + 8)
+      rect[3] = math.min(rect[3], p.camX + p.W - 8)
+      rect[4] = math.min(rect[4], p.camY + p.H - 24)
+    end
     local q = preset()
     local budget = (q.name == "POTATO" or q.name == "AUTO-3") and 0.5 or 1
     local dt = love.timer and love.timer.getDelta and love.timer.getDelta() or 1 / 60

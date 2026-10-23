@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.26.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.26.1", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1238,6 +1238,43 @@ do
   local v, n = CV.build()
   T.check(n > 0 and n % 4 == 0, "it all builds into quads")
   CV.reset()
+end
+
+do
+  -- a tall building (seven cells deep, a door in front) stands several
+  -- storeys; a six-deep one (the Game Corner, a Poke Center with its
+  -- corner pieces) stays at two
+  local rows = { "........", ".####...", ".####...", ".####...", ".####...", ".####...", ".####.#.", ".#D##.D.", "........" }
+  local g = HF.build(mapProvider(rows, L), 0, 0, 8, 9, { lumps = false })
+  local function hAt(cx, cy) return g.H[(cy * 4 + 1) * g.vcols + cx * 4 + 1 + 1] end
+  T.check(hAt(3, 7) > 32, "a seven-deep building with a door is taller than two storeys (" .. tostring(hAt(3, 7)) .. ")")
+  local rows6 = { "........", ".####...", ".####...", ".####...", ".####...", ".####...", ".#D##...", "........" }
+  local g6 = HF.build(mapProvider(rows6, L), 0, 0, 8, 8, { lumps = false })
+  local h6 = g6.H[(6 * 4 + 1) * g6.vcols + 3 * 4 + 1 + 1]
+  T.check(h6 == 32, "a six-deep building stays at two storeys (" .. tostring(h6) .. ")")
+  -- a building set into a hill (rock above it, its door in front) is its
+  -- own run, not the hill's: two storeys, the hill behind it taller
+  HF._rockMem = {}
+  local hrows = { "######", "######", "######", "#####.", "######", "######", "##D###", "......" }
+  local hc = mapProvider(hrows, L).cell
+  local function hcol(wx, wy)
+    local cy = math.floor(wy / 16)
+    if cy <= 2 then return 0.78, 0.62, 0.52 end -- rock
+    if cy <= 6 then return 0.3, 0.5, 0.9 end    -- the building
+    return 0.45, 0.8, 0.6
+  end
+  local hg = HF.build({ cell = hc, color = hcol }, 0, 0, 6, 8, { lumps = false, rock = true, roofs = true })
+  local function hh(cx, cy) return hg.H[(cy * 4 + 1) * hg.vcols + cx * 4 + 1 + 1] end
+  T.eq(hh(2, 5), 32, "the building in the hill stands two storeys")
+  T.check(hh(2, 1) > 32, "the hill behind it is a hill (" .. tostring(hh(2, 1)) .. ")")
+  -- indoors, a staircase cell is floor (the player arrives on it)
+  local Ls = {}
+  for k, v in pairs(L) do Ls[k] = v end
+  Ls["S"] = { kind = "solid", warpTile = true }
+  local rr = { "#####", "#...#", "#..S#", "#...#", "#####" }
+  local gi = HF.build({ cell = mapProvider(rr, Ls).cell, color = function() return 0.8, 0.7, 0.5 end }, 0, 0, 5, 5,
+    { lumps = false, indoor = true })
+  T.eq(gi.H[(2 * 4 + 1) * gi.vcols + 3 * 4 + 1 + 1], 0, "a staircase lies flat with the floor")
 end
 
 do

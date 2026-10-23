@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.26.1
+
+- Tall buildings -- seven cells deep or more, with a door in front (Lavender
+  Tower, Silph Co., the big department stores) -- stand several storeys
+  high, not capped at two: Lavender Tower stood lower than the hills
+  around it, sunk into the mountain.
+- A building set into a hillside is no longer part of the hill: Lavender
+  Town's Poke Center had a long strip of roof running back into the rock.
+- Indoors, staircases lie flat with the floor, and nobody vanishes on
+  them: arriving downstairs at the start of the game, the player stood
+  inside a wall-high box and disappeared.
+- Trees, cliffs and buildings no longer change shape while walking (the
+  rest of it, reported on FireRed and Emerald alike).  The map's art is
+  read from a quarter-size copy of the screen, one pixel per 4x4 block --
+  but blocks of the screen, which follows the camera pixel by pixel, so
+  the pixel each block was read at moved with every step, and the pine
+  crowns and cliff edges built from it came out a little different on
+  every rebuild.  The copy is now aligned to the world's 4x4 blocks: the
+  same pixel is read every time, wherever the camera is.  (The tileset
+  art used past the screen's edge reads the very same pixels; that is
+  FireRed/LeafGreen only now -- in Emerald it turned the forest north of
+  Petalburg into tall striped walls.)  In FireRed/LeafGreen, once a
+  tileset's art is seen to match the screen it is used everywhere, on
+  screen too: the screen mixes in characters and animation frames, and
+  Viridian Gym's roof changed shape as they came and went.
+- And everything that still changed as you walked, found by building every
+  map of FireRed/LeafGreen, Ruby/Sapphire and Emerald from many places
+  along a walk through it and comparing: long forests and tree walls (the
+  crown rounding and the dark rows between trees followed the edge of the
+  view), long mountains and cave walls (judged rock, tree or wall by how
+  much of them was in view), cliffs running into the border past the
+  map's edge (Cape Brink, Four Island), the Safari Zone's tree lines, Rock
+  Tunnel's walls, and the walls of big interiors (the Pokemon Mansion, the
+  S.S. Anne) that changed height from room to room.  Emerald and
+  Ruby/Sapphire read the screen world-aligned too now (their forests
+  changed at thousands of cells), a tile judged foliage on screen stays
+  foliage off it, and a forest standing on a cliff or behind a house is
+  split from it: Route 119's trees stood as rock, and Route 104's flower
+  shop with its trees as a green tower.
+- Emerald's forests: no flat strips of trees (grass showing between the
+  crowns) along the seams between maps, west and east of Petalburg.  The
+  sliver of border tiles between two maps' edges was split off the forest
+  as a run of its own.  The screen is also read at the very middle of each
+  pixel now, not on the corner between two.
+- Island coasts: the sea border around an island is remembered as sea,
+  not a wall that came and went (One, Seven and Birth Island).
+- Fireflies, birds, smoke, rain and cave dust stay over the map: on a
+  phone whose picture leaves a band of black below the map (the touch
+  buttons' area), fireflies glowed in that black too.
+
 ## 1.26.0
 
 - Cave atmosphere.  In caves:
