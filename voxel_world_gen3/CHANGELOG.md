@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.27.0
+
+- Waterfalls.  A waterfall is no longer a flat strip of river between the
+  cliffs: it falls from the cliff tops to the pool below as a sloping
+  sheet of water, the game's own falling-water art laid on it and bright
+  threads streaming down it, each at its own speed, whiter where it
+  churns at the foot.  Where it lands, mist billows up and drifts off,
+  drops of spray are thrown out and fall back, and froth spreads on the
+  pool.  Route 119, Route 114, Ever Grande City, Meteor Falls, Victory
+  Road, Cape Brink, Icefall Cave, Seafoam Islands and the Safari Zone.
+  Surfing up one, you ride up its slope.
+- New option WATERFALLS (on by default).
+- Smoother walking (the stutter since 1.26.1, reported by Ayush).  Since
+  1.26.1 every rebuild looks forty cells past the view, so that nothing
+  changes shape as you walk -- and read every one of those cells afresh,
+  judging each blocked cell by the 48 around it, every few steps: a
+  rebuild took about twice as long.  The map's cells and what each one
+  is are now remembered while you stay on the map, and the art tests
+  are asked once per cell per rebuild.
+- PERF STATS with a waterfall nearby: "falls N mN sN fN" -- waterfalls,
+  mist puffs, spray drops, froth.
+
 ## 1.26.1
 
 - Tall buildings -- seven cells deep or more, with a door in front (Lavender

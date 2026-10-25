@@ -34,6 +34,7 @@ local DayNight = use("daynight")
 local Weather3D = use("weather3d")
 local Critters = use("critters")
 local Caves = use("caves")
+local Falls = use("falls")
 local Smoke = use("smoke")
 local Footprints = use("footprints")
 Smoke.init(HF)
@@ -87,6 +88,7 @@ local settings = {
   clouds = true, -- cloud shadows drifting over the ground, clouds and stars in the sky
   waves = true, -- foam along shores, waves rolling in, a wake behind swimmers
   caveFx = true, -- dust in the air and dripping water in caves, a warm Flash glow
+  falls = true, -- waterfalls as sloping sheets of streaming water, mist and spray at the foot
   yaw = 0, -- camera turn in degrees (+ = swing east / RIGHT, - = west / LEFT)
   fov = 30,
 }
@@ -518,6 +520,42 @@ local function loadLamps()
   end
 end
 
+-- the map's cells, as the provider reads them (collision, metatile,
+-- behaviour: a few lookups each), remembered while the map, the maps around
+-- it and its metatiles stay the same -- every rebuild while walking read
+-- thousands of them again, the runs now looking forty cells past the view
+function Bridge.cachedCells(provider, world)
+  local m = state.cellCache
+  if not m or m.mapId ~= provider.mapId or m.world ~= world or m.revision ~= provider.revision
+      or m.def ~= provider.def then
+    m = { mapId = provider.mapId, world = world, revision = provider.revision, def = provider.def, t = {}, n = 0 }
+    state.cellCache = m
+  end
+  local t, cell = m.t, provider.cell
+  return function(cx, cy)
+    local key = (cy + 32768) * 65536 + (cx + 32768)
+    local v = t[key]
+    if v == nil then
+      v = cell(cx, cy) or false
+      m.n = m.n + 1
+      if m.n > 200000 then m.t, m.n = {}, 0; t = m.t end
+      t[key] = v
+    end
+    return v or nil
+  end
+end
+
+-- what each cell is (heightfield.lua kindOf), remembered while on one map
+-- (and the same maps loaded around it)
+function Bridge.kindMemo(mapId, world, revision)
+  local m = state.kindMemo
+  if not m or m.mapId ~= mapId or m.world ~= world or m.revision ~= revision then
+    m = { mapId = mapId, world = world, revision = revision, t = {} }
+    state.kindMemo = m
+  end
+  return m.t
+end
+
 function Bridge.lampMemory(mapId)
   loadLamps()
   state.lampMemory = state.lampMemory or {}
@@ -829,6 +867,7 @@ local function needsRebuild(provider, world, x0, y0, x1, y1)
   if b.relief ~= reliefKey(preset()) then return true end -- AUTO stepped: rebuild in the background
   if b.sun ~= settings.sunShadows then return true end
   if b.roofs ~= settings.roofs then return true end
+  if b.falls ~= (settings.falls ~= false) then return true end
   -- the sun moved on (every half hour of the day): bake its light anew
   if settings.sunShadows and b.sunKey ~= sunKeyFor(provider.def) then return true end
   if x0 < b.x0 or y0 < b.y0 or x1 > b.x1 or y1 > b.y1 then return true end
@@ -1062,19 +1101,22 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
     state.artStats = function() return nTile, nShot end
   end
   local q = preset()
-  local grid = HF.build({ cell = provider.cell, color = color, shape = provider.shape },
+  local MapW = Engine.get("src.core.game3.map")
+  local grid = HF.build({ cell = Bridge.cachedCells(provider, MapW and MapW.world), color = color, shape = provider.shape },
     x0, y0, x1 - x0 + 1, y1 - y0 + 1,
     { heightScale = settings.heightScale, lumps = settings.lumps, tick = tick,
       -- street lamps found before stay lamps (the quarter-size art a thin
       -- post is judged from shifts with the camera, so one rebuild saw a
       -- post that the next did not)
       lampMemory = Bridge.lampMemory(provider.mapId),
+      kindMemo = Bridge.kindMemo(provider.mapId, MapW and MapW.world, provider.revision),
       town = Bridge.isTown(provider.def),
       reliefBlock = q.blk, reliefStep = q.step, round = roundOf(q),
       roofs = settings.roofs and isOutdoor(provider.def),
       -- RSE draws its roofs ridged east-west (gable trim down the sides)
       ridge = (function() local f = Cells.family and Cells.family() return (f and f ~= "frlg") and "ew" or "ns" end)(),
       indoor = not isOutdoor(provider.def),
+      falls = settings.falls ~= false,
       -- mountains outdoors and in caves; never in houses, whose walls are
       -- the same warm beige
       rock = isOutdoor(provider.def) or tonumber(provider.def and provider.def.mapType) == 4
@@ -1116,6 +1158,8 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
   Scene.setTerrain(verts, idx, nv, ni, tick)
   Critters.setSpots(grid, HF.VOXEL)
   Smoke.setStacks(grid)
+  Falls.setFalls(grid, state.fallsMap == provider.mapId)
+  state.fallsMap = provider.mapId
   Scene.setLight(lightImage, grid.px, grid.py, grid.vcols * HF.VOXEL, grid.vrows * HF.VOXEL)
   local Map = Engine.get("src.core.game3.map")
   state.grid = grid
@@ -1123,7 +1167,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
   state.built = {
     mapId = provider.mapId, def = provider.def, revision = provider.revision,
     world = Map and Map.world, heightScale = settings.heightScale, lumps = settings.lumps,
-    relief = reliefKey(q), sun = settings.sunShadows, roofs = settings.roofs,
+    relief = reliefKey(q), sun = settings.sunShadows, roofs = settings.roofs, falls = settings.falls ~= false,
     sunKey = state.bakedSunKey or sunKeyFor(provider.def),
     x0 = x0, y0 = y0, x1 = x1, y1 = y1,
   }
@@ -1553,6 +1597,17 @@ function Bridge.renderPending(R)
       end
       Scene.setCritters({}, 0, {}, 0, {}, 0, {}, 0)
     end
+    -- waterfalls: mist, spray and froth at their feet (outdoors and in caves)
+    if settings.falls ~= false and Falls.active() then
+      local sxs, sys = state.shiftX or 0, state.shiftY or 0
+      Falls.update(dt, rect, sxs, sys, state.wind or Bridge.windFor(provider.def), budget)
+      Scene.setFallsFx(Falls.build(sxs, sys, tint))
+      local fs = Falls._state
+      state.fallsNote = ("  falls %d m%d s%d f%d"):format(#fs.list, #fs.mist, #fs.spray, #fs.froth)
+    else
+      Scene.setFallsFx({}, 0, {}, 0)
+      state.fallsNote = nil
+    end
     local wt = Weather3D.tint()
     if wt then
       local base = tint or { 1, 1, 1 }
@@ -1583,6 +1638,7 @@ function Bridge.renderPending(R)
   local okR = Scene.render({
     clouds = clouds, sky = sky,
     foam = settings.waves ~= false and state.grid ~= nil and state.grid.hasWater == true,
+    falls = settings.falls ~= false and state.grid ~= nil and #(state.grid.falls or {}) > 0,
     target = target, cam = cam,
     view = Camera.view(cam), proj = Camera.projection(cam, true),
     shiftX = state.shiftX, shiftY = state.shiftY,
@@ -1848,6 +1904,7 @@ function Bridge.install()
         if def then
           local wet = looksOutdoor(def)
           if state.caveNote then text = text .. "\n" .. state.caveNote:gsub("^%s+", "") end
+          if state.fallsNote then text = text .. "\n" .. state.fallsNote:gsub("^%s+", "") end
           text = text .. ("\nmap type %s  kind %s  env %s  water/grass %s  outdoor %s"):format(
             tostring(def.mapType), tostring(def.kind), tostring(def.environment),
             wet and (math.floor(wet * 100 + 0.5) .. "%") or "?", tostring(isOutdoor(def)))

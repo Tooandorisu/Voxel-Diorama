@@ -150,6 +150,7 @@ uniform LOVE_HIGHP_OR_MEDIUMP vec2 uCloudXY; // the pattern's drift + this pass'
 uniform float uCloudK;   // 1 / the pattern's size in world px
 uniform float uStars;    // night sky: stars twinkling in the water (0 = none)
 uniform float uFoam;     // shore foam and waves (0 = off)
+uniform float uFalls;    // waterfalls streaming (0 = off)
 uniform LOVE_HIGHP_OR_MEDIUMP vec3 uSlot; // atlas: first slot row (px), slot height, feet row
 
 const vec3 LUM = vec3(0.299, 0.587, 0.114);
@@ -307,6 +308,21 @@ vec4 effect(vec4 color, Image unused, vec2 tc, vec2 sc) {
       vec3 foamCol = max(vec3(0.97, 0.99, 1.0) * uTint, lit * 1.7 + vec3(0.1));
       lit = mix(lit, foamCol, clamp(foam, 0.0, 1.0) * 0.92 * uFoam);
     }
+  }
+  // waterfalls (vertex alpha 0.62, mesher.lua): bright streaks run down
+  // the sheet, each thread of water at its own speed, whiter toward the
+  // foot where it churns
+  float falls = uTerrain * (step(0.605, color.a) - step(0.64, color.a));
+  if (uFalls > 0.0 && falls > 0.5) {
+    float colh = fract(sin(floor(vWorld.x / 2.0) * 12.9898) * 43758.5453);
+    float run = fract(vWorld.y * 0.045 - uTime * (1.3 + colh * 0.9) + colh * 7.0);
+    float streak = smoothstep(0.0, 0.2, run) * (1.0 - smoothstep(0.2, 0.55, run));
+    float sheen = 0.5 + 0.5 * sin(vWorld.x * 0.9 + colh * 6.0);
+    vec3 white = max(vec3(0.92, 0.97, 1.0) * uTint, lit * 1.5 + vec3(0.08));
+    lit = mix(lit, white, streak * (0.3 + 0.35 * sheen) * uFalls);
+    // (the foot: within a few px of the water, all froth)
+    float foot = 1.0 - smoothstep(0.0, 10.0, vZ - uWaterLvl);
+    lit = mix(lit, white, foot * (0.45 + 0.25 * sin(uTime * 5.0 + vWorld.x * 0.7)) * uFalls);
   }
   // the night sky in the water: here and there a star, twinkling and
   // trembling with the waves (the sky itself is mostly off the screen)
@@ -688,6 +704,11 @@ function Scene.setCaveFx(v, n, idx, ni)
   fill("cavefx", v, n or 0, idx, ni)
 end
 
+-- waterfall mist, spray and froth (falls.lua): soft glows over the scene
+function Scene.setFallsFx(v, n, idx, ni)
+  fill("fallsfx", v, n or 0, idx, ni)
+end
+
 function Scene.setCritters(gv, gn, gi, gni, bv, bn, bi, bni)
   fill("flies", gv, gn or 0, gi, gni)
   fill("birds", bv, bn or 0, bi, bni)
@@ -881,6 +902,7 @@ function Scene.render(p)
   send("uCloudOn", 0)
   send("uStars", 0)
   send("uFoam", 0)
+  send("uFalls", 0)
   local dk = p.dark
   send("uDark", dk and { dk[1], dk[2], dk[3], 1 } or { 0, 0, 0, 0 })
   send("uDarkWarm", (dk and p.warmFlash) and 1 or 0)
@@ -968,9 +990,12 @@ function Scene.render(p)
   end
   send("uStars", p.sky and p.sky.stars or 0)
   send("uFoam", (lit and p.foam) and 1 or 0)
+  send("uFalls", p.falls and 1 or 0)
+  send("uWaterLvl", p.waterZ or -6)
   drawMesh("terrain")
   send("uPartOn", 0)
   send("uFoam", 0)
+  send("uFalls", 0)
   send("uStars", 0)
   send("uCloudOn", 0)
   send("uWindV", 0)
@@ -1127,6 +1152,19 @@ function Scene.render(p)
     send("uDesat", 0)
     love.graphics.setBlendMode("alpha")
     drawMesh("cavefx")
+  end
+
+  -- waterfall mist and spray: the same soft glows, blended over the scene
+  if (meshes.fallsfx and meshes.fallsfx.count or 0) > 0 then
+    love.graphics.setDepthMode("lequal", false)
+    send("uTex", glowTexture())
+    send("uOrigin", { 0, 0 })
+    send("uSize", { 16, 16 })
+    send("uCutout", -1)
+    send("uTint", { 1, 1, 1 })
+    send("uDesat", 0)
+    love.graphics.setBlendMode("alpha")
+    drawMesh("fallsfx")
   end
 
   -- engine OAM layer (emotes, field-move sprites): always on top, untinted

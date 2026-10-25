@@ -301,6 +301,39 @@ function Mesher.build(grid, VOXEL, tick)
   sides(1, SHADE_EAST, -0.5)
   sides(-1, SHADE_WEST, 0.5)
 
+  -- ------- waterfalls (heightfield.lua grid.falls): a sheet of water
+  -- sloping from the cliff tops down to the pool, the art laid on it row
+  -- for row (the game's own falling-water animation), flagged 0.62 for the
+  -- shader's streaming; its two sides close it down to the water
+  local FALLS_TOP, FALLS_SIDE = 0.62, 0.03
+  for _, f in ipairs(grid.falls or {}) do
+    tick()
+    local x1, x2, y0, y1, z0, z1 = f.x1 - E, f.x2 + E, f.y0, f.y1 + E, f.z0, f.z1
+    -- in strips a cell deep, so the light and the fog follow it down
+    local n = math.max(1, floor((f.y1 - f.y0) / 16 + 0.5))
+    for i = 0, n - 1 do
+      local ya, yb = y0 + (y1 - y0) * i / n, y0 + (y1 - y0) * (i + 1) / n
+      local za, zb = z0 + (z1 - z0) * i / n, z0 + (z1 - z0) * (i + 1) / n
+      local sa, sb = 0.96, 0.96
+      nv = nv + 4
+      verts[nv - 3] = { x1, ya, za, x1, ya, 0, 0, sa, sa, sa, FALLS_TOP }
+      verts[nv - 2] = { x2, ya, za, x2, ya, 0, 0, sa, sa, sa, FALLS_TOP }
+      verts[nv - 1] = { x2, yb, zb, x2, yb, 0, 0, sb, sb, sb, FALLS_TOP }
+      verts[nv] = { x1, yb, zb, x1, yb, 0, 0, sb, sb, sb, FALLS_TOP }
+      quadIdx()
+    end
+    -- the sides: a triangle each, from the slope's edge down to the water
+    for _, sd in ipairs({ { f.x1, SHADE_WEST }, { f.x2, SHADE_EAST } }) do
+      local x, sh = sd[1], sd[2] * 0.8
+      nv = nv + 4
+      verts[nv - 3] = { x, y0, z0, x, y0, 0, 0, sh, sh, sh, FALLS_SIDE }
+      verts[nv - 2] = { x, y1, z1, x, y1, 0, 0, sh, sh, sh, FALLS_SIDE }
+      verts[nv - 1] = { x, y1, z1, x, y1, 0, 0, sh, sh, sh, FALLS_SIDE }
+      verts[nv] = { x, y0, z1, x, y0, 0, 0, sh, sh, sh, FALLS_SIDE }
+      quadIdx()
+    end
+  end
+
   return verts, idx, nv, ni
 end
 
