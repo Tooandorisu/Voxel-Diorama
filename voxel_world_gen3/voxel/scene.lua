@@ -479,6 +479,7 @@ end
 -- yield to the next frame between them) and only swapped in when complete,
 -- so the old terrain keeps drawing while the new one is uploaded.
 function Scene.setTerrain(verts, idx, nv, ni, tick)
+  terrainPieces = nil
   if not tick or nv == 0 then
     return fill("terrain", verts, nv, idx, ni)
   end
@@ -498,9 +499,49 @@ function Scene.setTerrain(verts, idx, nv, ni, tick)
   if old and old.mesh then old.mesh:release() end
 end
 
--- the baked sun/ambient texture for the terrain (nil = no lighting)
-function Scene.setLight(image, x, y, w, h)
-  if lightImage and lightImage ~= image then lightImage:release() end
+-- A whole map built ahead (bridge.lua) is meshed in pieces, and only the
+-- pieces in view are drawn: all of Route 24 every frame would cost more than
+-- the rebuilds it saves.  A piece: { mesh, count, x0, y0, x1, y1 } (mesh
+-- space px).  Pieces belong to the caller, who releases them.
+local terrainPieces = nil
+local cullRect = nil
+
+function Scene.makePiece(verts, idx, nv, ni, tick, x0, y0, x1, y1)
+  if nv == 0 then return { count = 0, x0 = x0, y0 = y0, x1 = x1, y1 = y1 } end
+  local mesh = love.graphics.newMesh(Scene.FORMAT, nv, "triangles", "static")
+  local CHUNK = 2048
+  for first = 1, nv, CHUNK do
+    local last = math.min(nv, first + CHUNK - 1)
+    local part = {}
+    for i = first, last do part[i - first + 1] = verts[i] end
+    mesh:setVertices(part, first)
+    if tick then tick() end
+  end
+  mesh:setVertexMap(idx)
+  mesh:setDrawRange(1, ni)
+  return { mesh = mesh, count = ni, x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
+end
+
+function Scene.releasePieces(pieces)
+  for _, pc in ipairs(pieces or {}) do
+    if pc.mesh then pc.mesh:release(); pc.mesh = nil end
+  end
+end
+
+-- draw these pieces as the terrain (nil: the single terrain mesh again)
+function Scene.setTerrainPieces(pieces)
+  terrainPieces = pieces
+end
+
+function Scene.piecesDrawn() return Scene._drawnPieces or 0, terrainPieces and #terrainPieces or 0 end
+
+-- The baked sun/ambient texture for the terrain (nil = no lighting).
+-- keep: the image belongs to the caller (a whole map's, kept for coming
+-- back), so it is not released when replaced.
+local keptLight = setmetatable({}, { __mode = "k" })
+function Scene.setLight(image, x, y, w, h, keep)
+  if lightImage and lightImage ~= image and not keptLight[lightImage] then lightImage:release() end
+  if image and keep then keptLight[image] = true end
   lightImage = image
   lightRect = image and { x, y, w, h } or nil
 end
@@ -740,6 +781,24 @@ local function drawMesh(name)
   if m and m.count > 0 then love.graphics.draw(m.mesh) end
 end
 
+-- the terrain: the single mesh, or the pieces of a whole map in view
+local function drawTerrain()
+  if not terrainPieces then return drawMesh("terrain") end
+  local c, n = cullRect, 0
+  for _, pc in ipairs(terrainPieces) do
+    if pc.mesh and pc.count > 0 and (not c or (pc.x1 >= c[1] and pc.x0 <= c[3] and pc.y1 >= c[2] and pc.y0 <= c[4])) then
+      love.graphics.draw(pc.mesh)
+      n = n + 1
+    end
+  end
+  Scene._drawnPieces = n
+end
+
+local function terrainReady()
+  if terrainPieces then return #terrainPieces > 0 end
+  return meshes.terrain ~= nil and meshes.terrain.count > 0
+end
+
 local skyMesh
 local function skyGradient(w, h, top, bottom)
   -- one reusable mesh: creating a Mesh every frame is a GPU allocation
@@ -919,7 +978,8 @@ function Scene.render(p)
   send("uMirror", 0)
   send("uMirrorV", 0)
   local reflOn = false
-  if p.reflect and p.waterZ and meshes.terrain and meshes.terrain.count > 0 then
+  cullRect = p.cull
+  if p.reflect and p.waterZ and terrainReady() then
     local rw, rh = math.max(1, math.floor(w / 2)), math.max(1, math.floor(h / 2))
     local rc, rd = reflTargets(rw, rh)
     if rc and rd then
@@ -938,7 +998,7 @@ function Scene.render(p)
       send("uCutout", -1)
       send("uTerrain", 1)
       send("uWindV", p.wind or 0)
-      drawMesh("terrain")
+      drawTerrain()
       send("uWindV", 0)
       send("uTerrain", 0)
       send("uShift", { 0, 0 })
@@ -992,7 +1052,7 @@ function Scene.render(p)
   send("uFoam", (lit and p.foam) and 1 or 0)
   send("uFalls", p.falls and 1 or 0)
   send("uWaterLvl", p.waterZ or -6)
-  drawMesh("terrain")
+  drawTerrain()
   send("uPartOn", 0)
   send("uFoam", 0)
   send("uFalls", 0)

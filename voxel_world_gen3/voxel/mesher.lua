@@ -25,7 +25,11 @@ local FOOT_DARK = 0.78 -- side faces darken toward their base: cheap AO
 -- mountains); an overlap of coplanar, identically textured faces can't.
 local E = 0.08
 
-function Mesher.build(grid, VOXEL, tick)
+-- region (optional): { vx0, vy0, vx1, vy1 } voxels (the end exclusive) --
+-- one piece of a big grid (bridge.lua builds a whole map, and meshes it in
+-- pieces so only the ones in view are drawn).  A roof or a waterfall goes
+-- with the piece holding its north-west corner.
+function Mesher.build(grid, VOXEL, tick, region)
   VOXEL = VOXEL or 4
   tick = tick or function() end
   local H, S, K, C, L = grid.H, grid.S, grid.K, grid.C, grid.L
@@ -37,6 +41,18 @@ function Mesher.build(grid, VOXEL, tick)
   local CAP = grid.CAP or {} -- a wall's top px that hold its art's top row
   local vcols, vrows = grid.vcols, grid.vrows
   local px, py = grid.px, grid.py
+  local VX0, VY0, VX1, VY1 = 0, 0, vcols, vrows
+  if region then
+    VX0, VY0 = max(0, region[1]), max(0, region[2])
+    VX1, VY1 = min(vcols, region[3]), min(vrows, region[4])
+  end
+  -- (world px of the piece, for the roofs and waterfalls it owns)
+  local RX0, RY0 = px + VX0 * VOXEL, py + VY0 * VOXEL
+  local RX1, RY1 = px + VX1 * VOXEL, py + VY1 * VOXEL
+  local function owns(x, y)
+    if not region then return true end
+    return x >= RX0 and x < RX1 and y >= RY0 and y < RY1
+  end
 
   local verts, idx = {}, {}
   local nv, ni = 0, 0
@@ -76,9 +92,9 @@ function Mesher.build(grid, VOXEL, tick)
 
   -- ------- tops: greedy rectangles of equal (H, S, K, C, L)
   local done = {}
-  for vy = 0, vrows - 1 do
+  for vy = VY0, VY1 - 1 do
     tick()
-    for vx = 0, vcols - 1 do
+    for vx = VX0, VX1 - 1 do
       local a = k(vx, vy)
       if not done[a] then
         local h, s, kk, cc, l, f, sw, uo = H[a], S[a], K[a], C[a], L[a], F[a], SW[a], U[a]
@@ -88,13 +104,13 @@ function Mesher.build(grid, VOXEL, tick)
         -- big rectangles there were no corners for it to part at
         local cap = (sw == true and h > 0 and h < 14) and 2 or 1e9
         local w = 1
-        while vx + w < vcols and w < cap do
+        while vx + w < VX1 and w < cap do
           local c = k(vx + w, vy)
           if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then break end
           w = w + 1
         end
         local hgt = 1
-        while vy + hgt < vrows and hgt < cap do
+        while vy + hgt < VY1 and hgt < cap do
           local ok = true
           for i = 0, w - 1 do
             local c = k(vx + i, vy + hgt)
@@ -130,6 +146,7 @@ function Mesher.build(grid, VOXEL, tick)
   leaf, water, obj, sway = false, false, false, false
   for _, r in ipairs(grid.roofs or {}) do
     tick()
+    if not owns(r.x1, r.y0) then goto continue end
     if r.ridge == "ew" then
       -- RSE: the ridge runs east-west, the way the art draws these roofs
       -- (the yellow trim down a house's sides is its gable ends).  The
@@ -238,16 +255,16 @@ function Mesher.build(grid, VOXEL, tick)
   end
 
   -- ------- south faces, merged along x
-  for vy = 0, vrows - 2 do
+  for vy = VY0, min(VY1, vrows - 1) - 1 do
     tick()
-    local vx = 0
-    while vx < vcols do
+    local vx = VX0
+    while vx < VX1 do
       local a, n = k(vx, vy), k(vx, vy + 1)
       if H[a] > H[n] then
         local ha, hn, s, kk, cc, l, f, o, sw, uo, cp = H[a], H[n], S[a], K[a], C[a], L[a], F[a], B[a], SW[a], U[a], CAP[a]
         leaf, obj, sway = f == true, o ~= true and not grid.anyWindows, sw == true
         local w = 1
-        while vx + w < vcols do
+        while vx + w < VX1 do
           local a2, n2 = k(vx + w, vy), k(vx + w, vy + 1)
           if H[a2] ~= ha or H[n2] ~= hn or S[a2] ~= s or K[a2] ~= kk or C[a2] ~= cc or L[a2] ~= l or F[a2] ~= f or B[a2] ~= o or SW[a2] ~= sw
               or U[a2] ~= uo or CAP[a2] ~= cp then break end
@@ -265,18 +282,18 @@ function Mesher.build(grid, VOXEL, tick)
 
   -- ------- east / west faces, merged along y
   local function sides(dx, shade, uOff)
-    for vx = 0, vcols - 1 do
+    for vx = VX0, VX1 - 1 do
       tick()
       local nx = vx + dx
       if nx >= 0 and nx < vcols then
-        local vy = 0
-        while vy < vrows do
+        local vy = VY0
+        while vy < VY1 do
           local a, n = k(vx, vy), k(nx, vy)
           if H[a] > H[n] then
             local ha, hn, s, kk, cc, l, rk, f, o, sw, uo, cp = H[a], H[n], S[a], K[a], C[a], L[a], R[a], F[a], B[a], SW[a], U[a], CAP[a]
             leaf, obj, sway = f == true, o ~= true and not grid.anyWindows, sw == true
             local hgt = 1
-            while vy + hgt < vrows do
+            while vy + hgt < VY1 do
               local a2, n2 = k(vx, vy + hgt), k(nx, vy + hgt)
               if H[a2] ~= ha or H[n2] ~= hn or S[a2] ~= s or K[a2] ~= kk or C[a2] ~= cc or L[a2] ~= l or R[a2] ~= rk or F[a2] ~= f or B[a2] ~= o or SW[a2] ~= sw
                   or U[a2] ~= uo or CAP[a2] ~= cp then break end
@@ -308,6 +325,7 @@ function Mesher.build(grid, VOXEL, tick)
   local FALLS_TOP, FALLS_SIDE = 0.62, 0.03
   for _, f in ipairs(grid.falls or {}) do
     tick()
+    if not owns(f.x1, f.y0) then goto nextFall end
     local x1, x2, y0, y1, z0, z1 = f.x1 - E, f.x2 + E, f.y0, f.y1 + E, f.z0, f.z1
     -- in strips a cell deep, so the light and the fog follow it down
     local n = math.max(1, floor((f.y1 - f.y0) / 16 + 0.5))
@@ -332,6 +350,7 @@ function Mesher.build(grid, VOXEL, tick)
       verts[nv] = { x, y0, z1, x, y0, 0, 0, sh, sh, sh, FALLS_SIDE }
       quadIdx()
     end
+    ::nextFall::
   end
 
   return verts, idx, nv, ni

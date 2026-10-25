@@ -89,6 +89,7 @@ local settings = {
   waves = true, -- foam along shores, waves rolling in, a wake behind swimmers
   caveFx = true, -- dust in the air and dripping water in caves, a warm Flash glow
   falls = true, -- waterfalls as sloping sheets of streaming water, mist and spray at the foot
+  wholeMaps = true, -- build a whole (small enough) map ahead in the background, then stop rebuilding
   yaw = 0, -- camera turn in degrees (+ = swing east / RIGHT, - = west / LEFT)
   fov = 30,
 }
@@ -101,6 +102,7 @@ local state = {
   fz = nil,
   lastMap = nil,
   bigW = 0, bigH = 0,
+  wholeCache = {}, -- [mapId] = a whole map built ahead (see installWhole)
   ground = nil, atlas = nil, lowres = nil, final = nil,
   grid = nil, built = nil,
   pending = nil,
@@ -890,38 +892,160 @@ local function rebuild(...)
   state.tMesh = (love.timer.getTime() - t0) * 1000
 end
 
-local function startJob(...)
+-- slot: "job" (the view's next mesh) or "wjob" (a whole map, built ahead)
+local function startJobIn(slot, ...)
   local args = { ... }
   local job = { started = love.timer.getTime(), work = 0 }
   local function tick()
     if love.timer.getTime() > job.deadline then coroutine.yield() end
   end
   job.co = coroutine.create(function() rebuildInner(tick, unpack(args)) end)
-  state.job = job
+  state[slot] = job
 end
+local function startJob(...) return startJobIn("job", ...) end
 
-local function stepJob()
-  local job = state.job
+local function stepJobIn(slot, budget)
+  local job = state[slot]
   if not job then return end
   local t0 = love.timer.getTime()
-  -- part of the view is uncovered (just crossed into a new area): finish
-  -- faster; otherwise trickle along at the normal budget
-  job.deadline = t0 + (state.gap and JOB_BUDGET_GAP or JOB_BUDGET)
+  job.deadline = t0 + budget
   local ok, err = coroutine.resume(job.co)
   local spent = love.timer.getTime() - t0
   job.work = job.work + spent
   state.tJobFrame = (state.tJobFrame or 0) + spent * 1000
   if not ok then
-    state.job = nil
+    state[slot] = nil
     error(err, 0)
   end
   if coroutine.status(job.co) == "dead" then
-    state.job = nil
-    state.tMesh = job.work * 1000 -- total work, spread over many frames
+    if state[slot] == job then state[slot] = nil end
+    if slot == "job" then state.tMesh = job.work * 1000 end -- total work, spread over many frames
+    if slot == "wjob" then
+      state.tWhole = job.work * 1000
+      for _, e in pairs(state.wholeCache) do if not e.ms then e.ms = state.tWhole end end
+    end
+  end
+end
+local function stepJob()
+  -- part of the view is uncovered (just crossed into a new area): finish
+  -- faster; otherwise trickle along at the normal budget
+  return stepJobIn("job", state.gap and JOB_BUDGET_GAP or JOB_BUDGET)
+end
+
+-- ------- whole maps, built ahead
+-- Rebuilding the view every few steps was the stutter, and every rebuild
+-- also saw the map a little differently.  A map that is small enough is
+-- built whole -- plus a margin into the maps around it -- in the
+-- background, a few milliseconds a frame, while the view's own meshes
+-- carry on; once done it replaces them and nothing is rebuilt while you
+-- stay on it.  Kept for the last few maps, so walking back is instant.
+-- FireRed/LeafGreen only (outdoors): their tileset art stands in for the
+-- screen beyond the view; Ruby/Sapphire/Emerald have the screen alone,
+-- and a map built without its art would come out wrong.  Indoors, any game
+-- (a room is mostly on screen anyway).
+local PIECE = 24          -- cells per drawn piece
+-- (the margin into the maps around it is as far as the camera sees from
+-- the map's edge: on a wide phone held sideways that is 30-40 cells to
+-- each side.  A fixed 16 left a small route never covered.)
+local WHOLE_MAX = 16000   -- cells in all (map and margin): bigger maps keep the view's meshes
+local WHOLE_KEEP = 3      -- maps kept
+local WHOLE_BUDGET = 0.003
+local WHOLE_DEBUG = false
+
+local function tileArtReady()
+  local all = state.artCheck and state.artCheck._all
+  if not (all and all.n >= 200) then return false end
+  return math.max(all.ok, all.sw) / all.n >= 0.8
+end
+
+local function wholeKey(provider)
+  local q = preset()
+  return table.concat({ tostring(provider.revision), tostring(provider.def), tostring(settings.heightScale),
+    -- (not the relief detail: AUTO stepping down a tier threw away a whole
+    -- map nearly built; it keeps the detail it was built with)
+    tostring(settings.lumps), tostring(settings.sunShadows), tostring(settings.roofs),
+    tostring(settings.falls ~= false), settings.sunShadows and sunKeyFor(provider.def) or "-" }, "|")
+end
+
+local function mapSize(def)
+  local L = def and def.midLayout
+  local w = L and (L.trueWidth or L.width)
+  local h = L and (L.trueHeight or L.height)
+  return w, h
+end
+
+-- the whole map and, around it, as much as the view reaches past its edge
+-- (view: the cells the camera needs now, focus: the player's cell)
+local function wholeBounds(provider, view, fcx, fcy)
+  local w, h = mapSize(provider.def)
+  if not (w and h) then return nil end
+  local mL = math.max(4, fcx - view[1] + 3)
+  local mR = math.max(4, view[3] - fcx + 3)
+  local mN = math.max(4, fcy - view[2] + 3)
+  local mS = math.max(4, view[4] - fcy + 3)
+  return -mL, -mN, w - 1 + mR, h - 1 + mS
+end
+
+local function wholeEligible(provider, view, fcx, fcy)
+  if settings.wholeMaps == false then return false end
+  local w, h = mapSize(provider.def)
+  if not (w and h and w > 0 and h > 0) then return false, "size" end
+  local x0, y0, x1, y1 = wholeBounds(provider, view, fcx, fcy)
+  if (x1 - x0 + 1) * (y1 - y0 + 1) > WHOLE_MAX then return false, "too big" end
+  if not isOutdoor(provider.def) then return true end
+  if provider.family ~= "frlg" then return false, "not FireRed/LeafGreen" end
+  if settings.tileArt == false or not tileArtReady() then return false, "tileset art not checked yet" end
+  return true
+end
+
+local function evictWhole(id)
+  local e = state.wholeCache[id]
+  if not e then return end
+  state.wholeCache[id] = nil
+  -- in use: released once something else replaces it
+  if state.built and state.built.wholeOf == e then e.orphan = true return end
+  Scene.releasePieces(e.pieces)
+  if e.light then pcall(e.light.release, e.light) end
+end
+
+-- the mesh in use is being replaced: a whole map no longer kept goes now
+local function dropReplaced()
+  local e = state.built and state.built.wholeOf
+  if e and e.orphan then
+    e.orphan = nil
+    Scene.releasePieces(e.pieces)
+    if e.light then pcall(e.light.release, e.light) end
   end
 end
 
-rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
+local function installWhole(e, provider, world)
+  if WHOLE_DEBUG then print("whole: install", e.mapId, #e.pieces, e.verts, e.ms) end
+  dropReplaced()
+  Scene.setTerrainPieces(e.pieces)
+  Scene.setLight(e.light, e.grid.px, e.grid.py, e.grid.vcols * HF.VOXEL, e.grid.vrows * HF.VOXEL, true)
+  Critters.setSpots(e.grid, HF.VOXEL)
+  Smoke.setStacks(e.grid)
+  Falls.setFalls(e.grid, state.fallsMap == provider.mapId)
+  state.fallsMap = provider.mapId
+  state.grid = e.grid
+  state.shiftX, state.shiftY = 0, 0
+  local b = {}
+  for k, v in pairs(e.built) do b[k] = v end
+  b.world = world
+  b.relief = reliefKey(preset())
+  b.wholeOf = e
+  state.built = b
+  state.meshVerts, state.meshTris = e.verts, e.tris
+  state.job = nil -- the view's own next mesh is not needed now
+  e.used = love.timer.getTime()
+end
+
+local function wholeCovers(e, x0, y0, x1, y1)
+  local b = e.built
+  return x0 >= b.x0 and y0 >= b.y0 and x1 <= b.x1 and y1 <= b.y1
+end
+
+rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   -- read the flat map back once so foliage and grass can take relief from
   -- their own art; only the cells that need it are ever sampled
   -- The art is read back at quarter size: one texel per 4px voxel is all
@@ -1126,8 +1250,26 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
   if data then data:release() end
   if state.artStats then state.artTile, state.artShot = state.artStats() end
   Bridge.saveLamps()
-  local verts, idx, nv, ni = Mesher.build(grid, HF.VOXEL, tick)
-  state.meshVerts, state.meshTris = nv, ni / 3
+  local verts, idx, nv, ni, pieces
+  if whole then
+    -- in pieces, so only those in view are drawn
+    pieces, nv, ni = {}, 0, 0
+    local PV = PIECE * HF.PER
+    for vy = 0, grid.vrows - 1, PV do
+      for vx = 0, grid.vcols - 1, PV do
+        local pv, pidx, pn, pni = Mesher.build(grid, HF.VOXEL, tick, { vx, vy, vx + PV, vy + PV })
+        local px0, py0 = grid.px + vx * HF.VOXEL, grid.py + vy * HF.VOXEL
+        -- (bounds padded: a roof or a waterfall reaches past its corner,
+        -- and tall things lean north into view)
+        pieces[#pieces + 1] = Scene.makePiece(pv, pidx, pn, pni, tick,
+          px0 - 64, py0 - 96, px0 + PV * HF.VOXEL + 64, py0 + PV * HF.VOXEL + 32)
+        nv, ni = nv + pn, ni + pni
+      end
+    end
+  else
+    verts, idx, nv, ni = Mesher.build(grid, HF.VOXEL, tick)
+    state.meshVerts, state.meshTris = nv, ni / 3
+  end
   -- light: sun outdoors, ambient occlusion everywhere; swapped in together
   -- with the mesh it belongs to
   local lightImage
@@ -1155,6 +1297,31 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1)
     if okL then lightImage = img end
     if tick then tick() end
   end
+  if whole then
+    -- kept for a while: only what is still asked of it once meshed and lit
+    -- (where characters stand, the roofs for the chimneys, the waterfalls,
+    -- the lamps...) -- the texture rows, shades and flags of every voxel
+    -- of three whole maps were tens of megabytes
+    for _, k in ipairs({ "K", "C", "L", "R", "F", "B", "U", "CAP", "shore", "V" }) do grid[k] = nil end
+    local Map = Engine.get("src.core.game3.map")
+    -- (the map may have changed while this was built: keep it for later)
+    local e = { grid = grid, pieces = pieces, light = lightImage, verts = nv, tris = ni / 3,
+      key = whole.key, mapId = provider.mapId, used = love.timer.getTime(),
+      built = { mapId = provider.mapId, def = provider.def, revision = provider.revision,
+        world = Map and Map.world, heightScale = settings.heightScale, lumps = settings.lumps,
+        relief = reliefKey(q), sun = settings.sunShadows, roofs = settings.roofs, falls = settings.falls ~= false,
+        sunKey = state.bakedSunKey or sunKeyFor(provider.def), x0 = x0, y0 = y0, x1 = x1, y1 = y1, whole = true } }
+    evictWhole(provider.mapId)
+    state.wholeCache[provider.mapId] = e
+    -- keep the last few
+    local ids = {}
+    for id, o in pairs(state.wholeCache) do ids[#ids + 1] = { id = id, t = o.used } end
+    table.sort(ids, function(a, b) return a.t > b.t end)
+    for i = WHOLE_KEEP + 1, #ids do evictWhole(ids[i].id) end
+    state.wholeReady = true
+    return
+  end
+  dropReplaced()
   Scene.setTerrain(verts, idx, nv, ni, tick)
   Critters.setSpots(grid, HF.VOXEL)
   Smoke.setStacks(grid)
@@ -1196,6 +1363,7 @@ function Bridge.renderPending(R)
 
   local cam, scale = frameCamera(R, fx, fy, state.fz)
   local x1, y1, x2, y2 = Camera.visibleRect(cam, 40 * settings.heightScale, preset().view)
+  state.viewRect = { x1, y1, x2, y2 }
   local cx0 = math.floor(x1 / CELL) - 1
   local cy0 = math.floor(y1 / CELL) - 3 -- tall things north of the view lean in
   local cx1 = math.ceil(x2 / CELL) + 1
@@ -1225,6 +1393,32 @@ function Bridge.renderPending(R)
     end
   end
 
+  -- a whole map built ahead: in use as long as the view is on it
+  local wkey = wholeKey(provider)
+  local we = state.wholeCache[provider.mapId]
+  if we and we.key ~= wkey then evictWhole(provider.mapId); we = nil end
+  if we and not (state.built and state.built.wholeOf == we) and wholeCovers(we, cx0, cy0, cx1, cy1) then
+    installWhole(we, provider, world)
+  end
+  local view = { cx0, cy0, cx1, cy1 }
+  state.viewCells = view
+  local fcx, fcy = math.floor(fx / CELL), math.floor(fy / CELL)
+  local elig, why = false, nil
+  if not we and not state.wjob and state.wholeTried ~= provider.mapId .. "|" .. wkey then
+    elig, why = wholeEligible(provider, view, fcx, fcy)
+    state.wholeWhy = why
+  end
+  if elig then
+    state.wholeTried = provider.mapId .. "|" .. wkey
+    local wx0, wy0, wx1, wy1 = wholeBounds(provider, view, fcx, fcy)
+    startJobIn("wjob", provider, p, wx0, wy0, wx1, wy1, { key = wkey })
+    if WHOLE_DEBUG then print("whole: start", provider.mapId, wx0, wy0, wx1, wy1) end
+  end
+  -- (a whole build of a map left behind is dropped: its coordinates are
+  -- that map's)
+  if state.wjob and state.wjobMap and state.wjobMap ~= provider.mapId then state.wjob = nil end
+  state.wjobMap = state.wjob and (state.wjobMap or provider.mapId) or nil
+
   -- a different map (a warp), a changed setting or no mesh at all: build now
   local b = state.built
   local hard = not b or not state.grid or b.mapId ~= provider.mapId or b.def ~= provider.def
@@ -1242,6 +1436,22 @@ function Bridge.renderPending(R)
   end
   state.gap = state.job ~= nil and needsRebuild(provider, world, cx0, cy0, cx1, cy1)
   if state.job then stepJob() end
+  if state.wjob and not hard then stepJobIn("wjob", WHOLE_BUDGET) end
+  if state.wholeReady then
+    -- just finished: take it now if the view is on it
+    state.wholeReady = nil
+    if WHOLE_DEBUG then
+      local e = state.wholeCache[provider.mapId]
+      print("whole: ready", e and e.key == wkey, cx0, cy0, cx1, cy1, e and e.built.x0, e and e.built.y0, e and e.built.x1, e and e.built.y1)
+    end
+    local e = state.wholeCache[provider.mapId]
+    if e and e.key == wkey and wholeCovers(e, cx0, cy0, cx1, cy1) and not state.job then
+      installWhole(e, provider, world)
+    elseif e and e.key == wkey and wholeCovers(e, cx0, cy0, cx1, cy1) then
+      state.job = nil
+      installWhole(e, provider, world)
+    end
+  end
   if hard then
     state.settleUntil = now() + 1.5 -- a warp's one-off build is not "slow"
     -- (behind the warp's fade the game waits for it: build what the camera
@@ -1637,6 +1847,12 @@ function Bridge.renderPending(R)
   end
   local okR = Scene.render({
     clouds = clouds, sky = sky,
+    cull = (function()
+      local vr = state.viewRect
+      if not vr then return nil end
+      local sx, sy = state.shiftX or 0, state.shiftY or 0
+      return { vr[1] - sx - 32, vr[2] - sy - 64, vr[3] - sx + 32, vr[4] - sy + 32 }
+    end)(),
     foam = settings.waves ~= false and state.grid ~= nil and state.grid.hasWater == true,
     falls = settings.falls ~= false and state.grid ~= nil and #(state.grid.falls or {}) > 0,
     target = target, cam = cam,
@@ -1905,6 +2121,29 @@ function Bridge.install()
           local wet = looksOutdoor(def)
           if state.caveNote then text = text .. "\n" .. state.caveNote:gsub("^%s+", "") end
           if state.fallsNote then text = text .. "\n" .. state.fallsNote:gsub("^%s+", "") end
+          do
+            -- the whole map built ahead: in use (pieces drawn / all),
+            -- building, or not for this map
+            local we = state.built and state.built.wholeOf
+            local wtxt
+            if we then
+              local dn, all = Scene.piecesDrawn()
+              wtxt = ("whole map: in use, pieces %d/%d, built in %d ms"):format(dn, all, math.floor(we.ms or 0))
+            elseif state.wjob then
+              wtxt = ("whole map: building (%d ms so far)"):format(math.floor(state.wjob.work * 1000))
+            else
+              local e = state.wholeCache[state.lastMap or ""]
+              local vr = state.viewCells
+              if e and vr then
+                local b = e.built
+                wtxt = ("whole map: built, view outside it (view %d..%d %d..%d, built %d..%d %d..%d)"):format(
+                  vr[1], vr[3], vr[2], vr[4], b.x0, b.x1, b.y0, b.y1)
+              else
+                wtxt = "whole map: no" .. (state.wholeWhy and (" (" .. state.wholeWhy .. ")") or "")
+              end
+            end
+            text = text .. "\n" .. wtxt
+          end
           text = text .. ("\nmap type %s  kind %s  env %s  water/grass %s  outdoor %s"):format(
             tostring(def.mapType), tostring(def.kind), tostring(def.environment),
             wet and (math.floor(wet * 100 + 0.5) .. "%") or "?", tostring(isOutdoor(def)))
