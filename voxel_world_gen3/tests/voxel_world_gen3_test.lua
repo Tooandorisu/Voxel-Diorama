@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.27.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.28.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1841,6 +1841,19 @@ do
   local streaming = 0
   for _, v in ipairs(verts) do if math.abs(v[11] - 0.62) < 0.001 then streaming = streaming + 1 end end
   T.check(streaming >= 4, "the mesher lays the falling sheet, flagged for the shader")
+  -- meshed in pieces (a whole map built ahead): every waterfall and roof
+  -- exactly once, the same faces as in one piece
+  local pieceFalls, pieceTris = 0, 0
+  for vy = 0, g.vrows - 1, 16 do
+    for vx = 0, g.vcols - 1, 16 do
+      local pv, _, pn, pni = Mesher.build(g, HF.VOXEL, nil, { vx, vy, vx + 16, vy + 16 })
+      for i = 1, pn do if math.abs(pv[i][11] - 0.62) < 0.001 then pieceFalls = pieceFalls + 1 end end
+      pieceTris = pieceTris + pni
+    end
+  end
+  T.eq(pieceFalls, streaming, "in pieces, the waterfall is drawn once")
+  local _, _, _, wholeTris = Mesher.build(g, HF.VOXEL)
+  T.check(pieceTris >= wholeTris and pieceTris <= wholeTris * 2, "in pieces, about the same faces (" .. pieceTris .. " / " .. wholeTris .. ")")
   local g2 = HF.build(mapProvider(rows, legend), 0, 0, 7, 12, { lumps = false, rock = false, falls = false })
   T.eq(#g2.falls, 0, "WATERFALLS off: no sheet")
   local Falls = use("falls")

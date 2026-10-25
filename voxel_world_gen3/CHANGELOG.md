@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.28.0
+
+- Build ahead.  Until now the 3D map was rebuilt around you every few
+  steps as you walked -- the work behind the stutter, and a little
+  different every time.  Now, a few seconds after you arrive, the whole
+  map (and a margin into the maps around it) has been built in the
+  background, and from then on nothing is rebuilt while you stay on it:
+  walking is only the camera moving.  It is drawn in pieces, only those in
+  view.  The last three maps are kept, so going back is instant (through a
+  door and out again, a town is there at once).
+  - FireRed/LeafGreen outdoors, and indoors in every game.  Ruby,
+    Sapphire and Emerald outdoors keep the rebuilding for now: beyond the
+    screen they have no art to build from (FireRed/LeafGreen have their
+    tilesets).
+  - Maps up to about Saffron City's size; longer routes keep the
+    rebuilding.
+  - Until it is done, and past its edge, the view builds itself as before.
+- New option BUILD AHEAD (on by default).
+- PERF STATS: "whole map: in use, pieces 6/12, built in 2400 ms" (pieces
+  drawn / all) or "whole map: building".
+
 ## 1.27.0
 
 - Waterfalls.  A waterfall is no longer a flat strip of river between the
