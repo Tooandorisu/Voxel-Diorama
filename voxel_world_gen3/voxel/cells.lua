@@ -84,6 +84,12 @@ function Cells.provider()
     local ok, v = pcall(MBm.id, "PETALBURG_GYM_DOOR")
     if ok and type(v) == "number" then GYM_DOOR = v end
   end
+  -- waterfalls: MB_WATERFALL, 0x13 in every Gen 3 game
+  local WATERFALL = 0x13
+  if MBm and MBm.require then
+    local ok, v = pcall(MBm.require, "WATERFALL")
+    if ok and type(v) == "number" then WATERFALL = v end
+  end
   local world = Map.world or {}
   local indoorDef = def and (def.kind == "indoor" or tonumber(def.mapType) == 8 or tonumber(def.mapType) == 9)
 
@@ -163,12 +169,14 @@ function Cells.provider()
       if ok and type(beh) == "number" then
         if indoorDef and beh >= 0x62 and beh <= 0x6F then info.warpTile = true end
         if not indoorDef and (beh == WARP_DOOR or beh == GYM_DOOR) then info.warpDoor = true end
+        if beh == WATERFALL then info.waterfall = true end
       end
     end
     if kind ~= "solid" and L and Coll and Coll.behaviorOn then
       local ok, beh = pcall(Coll.behaviorOn, d, nx, ny)
       if ok and beh ~= nil then info.behKnown = true; info.beh = beh end
       if ok and beh == CAVE_DOOR then info.caveDoor = true end
+      if ok and beh == WATERFALL then info.waterfall = true end
       if ok and beh ~= nil and (beh == WARP_DOOR or beh == GYM_DOOR) then info.warpDoor = true end
     end
     -- FRLG's cliff and rock-face tiles (collision_frlg.lua CLIFF_MIDS):

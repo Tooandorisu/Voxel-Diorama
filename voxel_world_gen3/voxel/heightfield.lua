@@ -82,6 +82,7 @@ HF._rockMem = {}  -- [pair:mid] = rock by its art (rockCell), once seen
 HF._roomMem = {}  -- [map] = an interior's back wall depth, once seen
 HF._borderWater = {} -- [pair:mid] = a border tile is sea, once seen
 HF._leafMem = {}  -- [pair:mid] = foliage by its art, once seen
+HF._fallsMem = {} -- [map:x:y] = a waterfall's top height, once seen
 
 local function isFoliageColor(r, g, b)
   -- leafy greens and the dark blue-greens FRLG uses for tree shadow
@@ -223,13 +224,25 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   end
 
   local effective = {}
+  local kindMemo = opts.kindMemo
   local function kindOf(cx, cy)
     local c = at(cx, cy)
     if not c then return nil end
+    -- a waterfall is water, even the impassable stretch of it (Route 119)
+    if c.waterfall then return "water" end
     if c.kind ~= "solid" or c.tree then return c.kind end
     local key = cy * 65536 + cx
     local k = effective[key]
     if k then return k end
+    -- (remembered for the map, when the bridge keeps a memo: telling
+    -- impassable lawn from a wall looks at up to 48 cells around, and the
+    -- runs reach forty cells past the window -- every rebuild while walking
+    -- did it all again, and the game stuttered)
+    local mkey2 = kindMemo and ((cy + 32768) * 65536 + (cx + 32768))
+    if mkey2 then
+      local m = kindMemo[mkey2]
+      if m then effective[key] = m; return m end
+    end
     k = "solid"
     if c.border then
       -- (remembered per tile: the border's art is only there on screen,
@@ -241,8 +254,11 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         local w = isWaterColor(st) and true or false
         if mkey then HF._borderWater[mkey] = w end
         if w then k = "water" end
-      elseif mkey and HF._borderWater[mkey] then
-        k = "water"
+      elseif mkey and HF._borderWater[mkey] ~= nil then
+        if HF._borderWater[mkey] then k = "water" end
+      else
+        -- (not judged yet: not remembered for the map either)
+        mkey2 = nil
       end
       -- a sliver between two maps' edges, beyond both: the current map's
       -- border tile fills it (a forest, for Rustboro) -- out in the sea
@@ -284,6 +300,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       end
     end
     effective[key] = k
+    if mkey2 then kindMemo[mkey2] = k end
     return k
   end
   HF._kindOf = kindOf -- for tests
@@ -318,7 +335,24 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- past the screen, and judged only by what was on screen a forest stood
   -- as trees from one spot and as a four-storey block from the next)
   local leafMem = HF._leafMem
+  -- (both judgements asked again and again -- the runs now look forty
+  -- cells past the window, and every step asks whether a hill or a forest
+  -- ends there -- so remembered for the build: they doubled its time)
+  local NONE = {}
+  local leafMemo, rockMemo = {}, {}
+  local foliageCell0
   local function foliageCell(cx, cy)
+    local key = (cy - y0 + 256) * 65536 + (cx - x0 + 256)
+    local v = leafMemo[key]
+    if v == nil then
+      v = foliageCell0(cx, cy)
+      leafMemo[key] = v == nil and NONE or v
+      return v
+    end
+    if v == NONE then return nil end
+    return v
+  end
+  foliageCell0 = function(cx, cy)
     if not color then return nil end
     local c0 = at(cx, cy)
     local mkey = c0 and c0.mid ~= nil and (tostring(c0.pair or c0.map) .. ":" .. tostring(c0.mid)) or nil
@@ -353,7 +387,19 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- screen, is rock everywhere and every time after.
   local tileRockMem = HF._rockMem
   -- (nil: no art for it on hand, and never judged)
+  local rockKnown0
   local function rockKnown(cx, cy)
+    local key = (cy - y0 + 256) * 65536 + (cx - x0 + 256)
+    local v = rockMemo[key]
+    if v == nil then
+      v = rockKnown0(cx, cy)
+      rockMemo[key] = v == nil and NONE or v
+      return v
+    end
+    if v == NONE then return nil end
+    return v
+  end
+  rockKnown0 = function(cx, cy)
     local c = at(cx, cy)
     if c and c.cliff then return true end
     local key = c and c.mid ~= nil and (tostring(c.pair) .. ":" .. tostring(c.mid)) or nil
@@ -2349,6 +2395,71 @@ function HF.build(provider, x0, y0, cols, rows, opts)
               end
             end
             grid.exitFloors = grid.exitFloors + 1
+          end
+        end
+      end
+    end
+  end
+
+  -- Waterfalls (the metatile behaviour MB_WATERFALL, cells.lua): flat, a
+  -- waterfall was a strip of river running between the cliffs.  Each one
+  -- is a sheet of water sloping from the cliff tops down to the pool at
+  -- its foot (drawn by the mesher, the art streaming down it, scene.lua),
+  -- with mist and spray where it lands (falls.lua).  Adjacent columns with
+  -- the same rows are one waterfall; its top is the height of the cliffs
+  -- either side of it.  A swimmer going up it rides the slope (FL).
+  grid.falls = {}
+  if opts.falls ~= false then
+    local function isFall(cx, cy)
+      local c = at(cx, cy)
+      return c ~= nil and c.waterfall == true
+    end
+    local function cellH(cx, cy)
+      local vx, vy = (cx - x0) * PER + 1, (cy - y0) * PER + 1
+      if vx < 0 or vy < 0 or vx >= vcols or vy >= vrows then return nil end
+      return H[vindex(vx, vy)]
+    end
+    local seen = {}
+    for cx = x0 - 1, x0 + cols do
+      for cy = y0 - 12, y0 + rows + 12 do
+        if not seen[cy * 65536 + cx] and isFall(cx, cy) and not isFall(cx, cy - 1) then
+          local bottom = cy
+          while isFall(cx, bottom + 1) and bottom - cy < 30 do bottom = bottom + 1 end
+          -- the columns beside it with the same rows
+          local x1, x2 = cx, cx
+          while isFall(x2 + 1, cy) and not isFall(x2 + 1, cy - 1) and isFall(x2 + 1, bottom)
+              and not isFall(x2 + 1, bottom + 1) do x2 = x2 + 1 end
+          for x = x1, x2 do
+            for y = cy, bottom do seen[y * 65536 + x] = true end
+          end
+          local top = nil
+          for _, x in ipairs({ x1 - 1, x2 + 1 }) do
+            for y = cy, min(cy + 1, bottom) do
+              local h = cellH(x, y)
+              if h and h > 0 and (not top or h > top) then top = h end
+            end
+          end
+          -- (remembered: with the cliffs beside it out of the window it would
+          -- fall from a different height)
+          local c0 = at(cx, cy)
+          local mk = tostring(c0 and (c0.map or c0.pair)) .. ":" .. cx .. ":" .. cy
+          if top and top >= 16 then HF._fallsMem[mk] = top else top = HF._fallsMem[mk] end
+          if not top or top < 16 then top = snap(32 * scale) end
+          if top > 64 then top = 64 end
+          local f = { x1 = x1 * CELL, x2 = (x2 + 1) * CELL, y0 = cy * CELL, y1 = (bottom + 1) * CELL,
+            z0 = top, z1 = HF.WATER }
+          grid.falls[#grid.falls + 1] = f
+          -- the slope, for a swimmer on it
+          for y = max(cy, y0), min(bottom, y0 + rows - 1) do
+            for j = 0, PER - 1 do
+              local wy = y * CELL + j * VOXEL + VOXEL / 2
+              local z = f.z0 + (f.z1 - f.z0) * (wy - f.y0) / (f.y1 - f.y0)
+              for x = max(x1, x0), min(x2, x0 + cols - 1) do
+                for i = 0, PER - 1 do
+                  FL[vindex((x - x0) * PER + i, (y - y0) * PER + j)] = z
+                end
+              end
+            end
           end
         end
       end

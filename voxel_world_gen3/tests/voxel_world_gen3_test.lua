@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.26.1", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.27.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -59,7 +59,7 @@ local HF, Mesher, Camera = use("heightfield"), use("mesher"), use("camera")
 -- inside the mod sandbox `package` is a stand-in whose `loaded` is empty, so
 -- every engine lookup must go through require (voxel/engine.lua)
 for _, f in ipairs({ "main.lua", "voxel/bridge.lua", "voxel/cells.lua", "voxel/scene.lua",
-                     "voxel/heightfield.lua", "voxel/mesher.lua", "voxel/camera.lua", "voxel/tiles.lua", "voxel/critters.lua", "voxel/smoke.lua", "voxel/footprints.lua", "voxel/caves.lua" }) do
+                     "voxel/heightfield.lua", "voxel/mesher.lua", "voxel/camera.lua", "voxel/tiles.lua", "voxel/critters.lua", "voxel/smoke.lua", "voxel/footprints.lua", "voxel/caves.lua", "voxel/falls.lua" }) do
   T.check(not read(MOD .. "/" .. f):find("package%.loaded"), f .. " never reads package.loaded")
 end
 do
@@ -1817,6 +1817,43 @@ do
   T.check(a[2] > 800 and b[1] > 450, "camera swung east: east sides come toward it, north leans right")
   local x1, y1, x2, y2 = Camera.visibleRect(c30, 40, 560)
   T.check(x1 < 200 and x2 > 200 and y1 < 300 and y2 > 300, "the visible ground still surrounds the player")
+end
+
+do
+  -- a waterfall: three rows of falling water between cliffs, a pool above
+  -- and below -- a sheet sloping from the cliff tops down to the pool,
+  -- streamed (mesher flag 0.62), ridden by a swimmer, mist at its foot
+  local legend = {
+    ["."] = { kind = "ground" }, ["#"] = { kind = "solid" }, ["~"] = { kind = "water" },
+    ["F"] = { kind = "water", waterfall = true }, ["f"] = { kind = "solid", waterfall = true },
+  }
+  local rows = { "##~~~##", "##~~~##", "##~~~##", "##~~~##", "##~~~##", "##~~~##",
+                 "##FFf##", "##FFf##", "##FFf##", "#~~~~~#", "#~~~~~#", "......." }
+  local g = HF.build(mapProvider(rows, legend), 0, 0, 7, 12, { lumps = false, rock = false })
+  T.eq(#g.falls, 1, "one waterfall, its three columns together (the impassable one too)")
+  local f = g.falls[1]
+  T.check(f and f.x1 == 32 and f.x2 == 80 and f.y0 == 96 and f.y1 == 144, "the waterfall covers its cells")
+  T.check(f and f.z0 >= 16 and f.z1 == HF.WATER, "it falls from the cliff tops to the water (" .. tostring(f and f.z0) .. ")")
+  local hTop = HF.floorAt(g, 40, 98)
+  local hFoot = HF.floorAt(g, 40, 142)
+  T.check(hTop > hFoot and hTop > 10, "a swimmer rides up its slope")
+  local verts = Mesher.build(g, HF.VOXEL)
+  local streaming = 0
+  for _, v in ipairs(verts) do if math.abs(v[11] - 0.62) < 0.001 then streaming = streaming + 1 end end
+  T.check(streaming >= 4, "the mesher lays the falling sheet, flagged for the shader")
+  local g2 = HF.build(mapProvider(rows, legend), 0, 0, 7, 12, { lumps = false, rock = false, falls = false })
+  T.eq(#g2.falls, 0, "WATERFALLS off: no sheet")
+  local Falls = use("falls")
+  Falls.reset()
+  Falls.setFalls(g, false)
+  for _ = 1, 30 do Falls.update(1 / 30, nil, 0, 0, 1, 1) end
+  local st = Falls._state
+  T.check(#st.mist > 0 and #st.spray > 0, "mist and spray rise at its foot")
+  local v, n = Falls.build(0, 0)
+  T.check(n > 0, "and are drawn")
+  local below = true
+  for _, m in ipairs(st.mist) do if m.y < 144 then below = false end end
+  T.check(below, "the mist starts at the foot, not up on the cliff")
 end
 
 T.finish("voxel_world_gen3")
