@@ -1330,6 +1330,25 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           end
           narrow = beside * 2 < cells
         end
+        -- A fence, known by its tiles' outline (the top layer, drawn over
+        -- the lawn: a thin rail or posts), is a fence whatever stands beside
+        -- it: Route 7's fence by the Saffron gate ran along the gatehouse and
+        -- the trees, was taken for a block, and stood up as a long raised
+        -- slab of lawn.  Knee-high and cut out of the lawn.
+        if not narrow and not tree and not foliage and not caveMound and provider.shape and opts.indoor ~= true then
+          local thin, known = 0, 0
+          for y = top, bottom do
+            local c = at(cx, y)
+            local sh = c and provider.shape(c)
+            if sh and sh.n then
+              known = known + 1
+              if sh.n > 0 and sh.n <= 150 and (sh.medW <= 7 or (sh.left and sh.right and sh.rows <= 10)) then
+                thin = thin + 1
+              end
+            end
+          end
+          if known >= 2 and thin * 10 >= known * 7 then narrow = true end
+        end
         -- A run standing in the sea (a chain of rocks, rocks touching one
         -- another) is never a building, however deep: knee-high, cut out of
         -- the water, no roof.

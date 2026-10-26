@@ -1775,7 +1775,18 @@ function Bridge.renderPending(R)
     -- sees and two cells more (a couple of steps), not the usual margin --
     -- a quarter less to do in a dense forest.  The background job grows it
     -- from there, starting on the very next frame.)
-    rebuild(provider, p, cx0 - 2, cy0 - 2, cx1 + 2, cy1 + 2)
+    -- (out of a building the camera is still zoomed in on the room and
+    -- tilted for it, and eases out over the next half second: built for
+    -- that narrow view, the town's sides stood black until the next mesh
+    -- -- so from indoors, the view the camera will open up to)
+    local m = 2
+    local prev = b and b.def
+    if prev and not isOutdoor(prev) and isOutdoor(provider.def) then
+      local w = math.floor((cx1 - cx0) * 0.6)
+      rebuild(provider, p, cx0 - m - w, cy0 - m - 8, cx1 + m + w, cy1 + m + 2)
+    else
+      rebuild(provider, p, cx0 - m, cy0 - m, cx1 + m, cy1 + m)
+    end
   end
 
   -- a character whose feet are inside a building's footprint has walked

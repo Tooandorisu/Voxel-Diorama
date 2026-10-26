@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.29.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.29.1", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1887,6 +1887,29 @@ do
   local below = true
   for _, m in ipairs(st.mist) do if m.y < 144 then below = false end end
   T.check(below, "the mist starts at the foot, not up on the cliff")
+end
+
+do
+  -- a fence column (thin rails in its tiles' top layer) running between a
+  -- building and the trees is a fence, knee-high -- not a block of lawn
+  local rows = { "..#T..", "..#T..", "###T..", "###T..", "###T..", "..#T..", "......" }
+  local mp = mapProvider(rows, L)
+  local provider = {
+    cell = function(cx, cy)
+      local c = mp.cell(cx, cy)
+      local out = {}
+      for k, v in pairs(c) do out[k] = v end
+      out.mid = (cx == 2 and c.kind == "solid") and 7 or 1
+      return out
+    end,
+    shape = function(c)
+      if c.mid == 7 then return { n = 60, medW = 3, rows = 16, left = false, right = false } end
+      return { n = 256, medW = 16, rows = 16, left = true, right = true }
+    end,
+  }
+  local g = HF.build(provider, 0, 0, 6, 7, { lumps = false })
+  local h = g.H[(0 * 4 + 1) * g.vcols + 2 * 4 + 1 + 1]
+  T.check(h <= 8, "a fence beside a building and trees stays knee-high (" .. tostring(h) .. ")")
 end
 
 T.finish("voxel_world_gen3")
