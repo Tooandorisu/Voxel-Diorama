@@ -539,9 +539,14 @@ function Bridge.cachedCells(provider, world)
     local v = t[key]
     if v == nil then
       v = cell(cx, cy) or false
-      m.n = m.n + 1
-      if m.n > 200000 then m.t, m.n = {}, 0; t = m.t end
-      t[key] = v
+      -- (not past the loaded maps: a neighbour whose layout is still on
+      -- its way reads as border until it arrives, and kept as border it
+      -- stood as a jumble of raised blocks -- Oldale from Route 102)
+      if not (v and v.border) then
+        m.n = m.n + 1
+        if m.n > 200000 then m.t, m.n = {}, 0; t = m.t end
+        t[key] = v
+      end
     end
     return v or nil
   end
@@ -549,10 +554,23 @@ end
 
 -- what each cell is (heightfield.lua kindOf), remembered while on one map
 -- (and the same maps loaded around it)
-function Bridge.kindMemo(mapId, world, revision)
+-- how many of the maps around are loaded (their layouts arrive a little
+-- after the list of them)
+local function worldReady(world)
+  local n = 0
+  for _, e in ipairs(world or {}) do
+    local L = e.def and e.def.midLayout
+    if L and L.midAt then n = n + 1 end
+  end
+  return n
+end
+Bridge._worldReady = worldReady
+
+function Bridge.kindMemo(mapId, world, revision, def)
   local m = state.kindMemo
-  if not m or m.mapId ~= mapId or m.world ~= world or m.revision ~= revision then
-    m = { mapId = mapId, world = world, revision = revision, t = {} }
+  local ready = worldReady(world)
+  if not m or m.mapId ~= mapId or m.world ~= world or m.revision ~= revision or m.ready ~= ready or m.def ~= def then
+    m = { mapId = mapId, world = world, revision = revision, ready = ready, def = def, t = {} }
     state.kindMemo = m
   end
   return m.t
@@ -597,6 +615,110 @@ function Bridge.saveLamps()
   for _, l in ipairs(otherTypes) do lines[#lines + 1] = l end
   table.sort(lines)
   pcall(lampCache.write, lampCache, LAMP_FILE, table.concat(lines, "\n") .. "\n")
+end
+
+-- ------- tile art learned from the screen
+-- Ruby/Sapphire/Emerald: the tilesets' own art did not match what the
+-- screen shows (their forests came out as tall striped walls), so a map
+-- tile's art is learned from the screen instead: the first time a whole
+-- cell of it is on screen, its sixteen 4x4 blocks are kept -- the very
+-- pixels the capture reads there -- and stand in for the screen wherever
+-- that tile lies beyond it.  Kept on disk too, so once seen a tile is
+-- known for good.  [pair:mid] = { r, g, b, r, g, b, ... } (16 blocks).
+local ART_FILE = "tileart/v3.txt" -- (v1: test builds that could learn from a mismatched screen)
+local learnedArt, learnedCount, learnedSaved, learnedSavedAt = nil, 0, 0, 0
+
+function Bridge.learnedArt()
+  if learnedArt then return learnedArt end
+  learnedArt = {}
+  if lampCache and lampCache.read then
+    local ok, text = pcall(lampCache.read, lampCache, ART_FILE)
+    if ok and type(text) == "string" then
+      for key, hex in text:gmatch("([^\t\n]+)\t(%x+)") do
+        if #hex == 96 then
+          local t = {}
+          for i = 1, 48 do t[i] = tonumber(hex:sub(i * 2 - 1, i * 2), 16) / 255 end
+          learnedArt[key] = t
+          learnedCount = learnedCount + 1
+        end
+      end
+    end
+  end
+  learnedSaved = learnedCount
+  return learnedArt
+end
+
+function Bridge.saveLearnedArt(force)
+  if not (learnedArt and lampCache and lampCache.write) then return end
+  if learnedCount == learnedSaved then return end
+  local t = love.timer and love.timer.getTime() or 0
+  if not force and learnedCount - learnedSaved < 40 and t - learnedSavedAt < 30 then return end
+  learnedSaved, learnedSavedAt = learnedCount, t
+  local lines = {}
+  for key, v in pairs(learnedArt) do
+    local hex = {}
+    for i = 1, 48 do hex[i] = string.format("%02x", math.floor(v[i] * 255 + 0.5)) end
+    lines[#lines + 1] = key .. "\t" .. table.concat(hex)
+  end
+  table.sort(lines)
+  pcall(lampCache.write, lampCache, ART_FILE, table.concat(lines, "\n") .. "\n")
+end
+
+local function artKey(c)
+  if not (c and not c.border and c.mid ~= nil and c.pair ~= nil) then return nil end
+  return tostring(c.pair) .. ":" .. tostring(c.mid)
+end
+
+-- learn every tile wholly on screen that is not known yet
+local function learnFrom(shot, cellOf, gx, gy, W, H, tick)
+  local art = Bridge.learnedArt()
+  local cx0, cy0 = math.ceil(gx / CELL), math.ceil(gy / CELL)
+  local cx1, cy1 = math.floor((gx + W) / CELL) - 1, math.floor((gy + H) / CELL) - 1
+  local n = 0
+  for cy = cy0, cy1 do
+    if tick then tick() end
+    for cx = cx0, cx1 do
+      local key = artKey(cellOf(cx, cy))
+      if key and not art[key] then
+        local t, ok = {}, true
+        for b = 0, 15 do
+          local r, g, bl = shot(cx * CELL + (b % 4) * 4 + 2, cy * CELL + math.floor(b / 4) * 4 + 2)
+          if not r then ok = false break end
+          t[b * 3 + 1], t[b * 3 + 2], t[b * 3 + 3] = r, g, bl
+        end
+        if ok then art[key] = t; n = n + 1 end
+      end
+    end
+  end
+  learnedCount = learnedCount + n
+  return n
+end
+Bridge._learnFrom = learnFrom -- for tests
+
+-- how much of a map's ground is known by its art (0..1); with bounds, of
+-- that whole area (the margin reaches into the maps around it, and a map
+-- built ahead before its neighbour had been seen stood there as a jumble
+-- -- Oldale's paths raised as blocks, seen from Route 102)
+local function learnedCoverage(provider, cellOf, bx0, by0, bx1, by1)
+  local L = provider.def and provider.def.midLayout
+  local w = L and (L.trueWidth or L.width)
+  local h = L and (L.trueHeight or L.height)
+  if not (w and h) then return 0 end
+  local art = Bridge.learnedArt()
+  local known, all = 0, 0
+  bx0, by0, bx1, by1 = bx0 or 0, by0 or 0, bx1 or (w - 1), by1 or (h - 1)
+  -- (every other cell is plenty to tell, at a quarter of the cost)
+  local step = ((bx1 - bx0 + 1) * (by1 - by0 + 1) > 4000) and 2 or 1
+  for cy = by0, by1, step do
+    for cx = bx0, bx1, step do
+      local key = artKey(cellOf(cx, cy))
+      if key then
+        all = all + 1
+        if art[key] then known = known + 1 end
+      end
+    end
+  end
+  return all > 0 and known / all or 0
 end
 
 -- towns and cities (map types 1 and 2), where street lamps stand
@@ -993,8 +1115,17 @@ local function wholeEligible(provider, view, fcx, fcy)
   local x0, y0, x1, y1 = wholeBounds(provider, view, fcx, fcy)
   if (x1 - x0 + 1) * (y1 - y0 + 1) > WHOLE_MAX then return false, "too big" end
   if not isOutdoor(provider.def) then return true end
-  if provider.family ~= "frlg" then return false, "not FireRed/LeafGreen" end
-  if settings.tileArt == false or not tileArtReady() then return false, "tileset art not checked yet" end
+  if settings.tileArt == false then return false, "tile art off" end
+  if provider.family ~= "frlg" then
+    -- built once most of the map's tiles have been seen (and again when
+    -- many more have: wholeKey)
+    local MapL = Engine.get("src.core.game3.map")
+    local cov = learnedCoverage(provider, Bridge.cachedCells(provider, MapL and MapL.world))
+    state.wholeCov = cov
+    if cov < 0.6 then return false, ("seen %d%% of its tiles, needs 60%%"):format(math.floor(cov * 100)) end
+    return true
+  end
+  if not tileArtReady() then return false, "tileset art not checked yet" end
   return true
 end
 
@@ -1224,6 +1355,67 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     end
     state.artStats = function() return nTile, nShot end
   end
+  -- Ruby/Sapphire/Emerald: the capture, then the art learned from it
+  if settings.tileArt ~= false and provider.family ~= "frlg" then
+    local MapL = Engine.get("src.core.game3.map")
+    local cellOf = Bridge.cachedCells(provider, MapL and MapL.world)
+    local art = Bridge.learnedArt()
+    -- (only in the background: the one-off build at a warp reads the
+    -- screen behind the fade)
+    -- Is the picture where the map says it is?  Right across a seam into
+    -- the next map, the field picture can still lie in the last map's
+    -- coordinates for a moment; built from it, every cell read another
+    -- cell's art (Oldale from Route 102, Petalburg from Route 104: paths
+    -- taken for trees and raised, the Mart flat).  Tiles already known are
+    -- compared with what the picture shows at their cells: if most do not
+    -- match, nothing is built (or learned) from this picture.
+    if shot then
+      local tested, matched = 0, 0
+      local ccx, ccy = math.floor((gx + W / 2) / CELL), math.floor((gy + H / 2) / CELL)
+      for dy = -8, 8, 2 do
+        for dx = -12, 12, 2 do
+          local cx, cy = ccx + dx, ccy + dy
+          local t = art[artKey(cellOf(cx, cy))]
+          if t then
+            local good, n = 0, 0
+            for _, b in ipairs({ 5, 6, 9, 10 }) do
+              local r, g, bl = shot(cx * CELL + (b % 4) * 4 + 2, cy * CELL + math.floor(b / 4) * 4 + 2)
+              if r then
+                n = n + 1
+                local d = math.abs(r - t[b * 3 + 1]) + math.abs(g - t[b * 3 + 2]) + math.abs(bl - t[b * 3 + 3])
+                if d < 0.15 then good = good + 1 end
+              end
+            end
+            if n >= 3 then
+              tested = tested + 1
+              if good >= n - 1 then matched = matched + 1 end
+            end
+          end
+        end
+      end
+      state.alignNote = ("%d/%d"):format(matched, tested)
+      if tested >= 8 and matched * 2 < tested then
+        state.misalignedT = love.timer.getTime()
+        if data then data:release() end
+        if whole then state.wholeTried = nil end -- (asked again once it matches)
+        return false
+      end
+    end
+    if shot and tick then state.learnedNew = learnFrom(shot, cellOf, gx, gy, W, H, tick) end
+    local base = color
+    color = function(wx, wy)
+      if base then
+        local r, g, b = base(wx, wy)
+        if r then return r, g, b end
+      end
+      local cx, cy = math.floor(wx / CELL), math.floor(wy / CELL)
+      local key = artKey(cellOf(cx, cy))
+      local t = key and art[key]
+      if not t then return nil end
+      local i = (math.floor((wy - cy * CELL) / 4) * 4 + math.floor((wx - cx * CELL) / 4)) * 3
+      return t[i + 1], t[i + 2], t[i + 3]
+    end
+  end
   local q = preset()
   local MapW = Engine.get("src.core.game3.map")
   local grid = HF.build({ cell = Bridge.cachedCells(provider, MapW and MapW.world), color = color, shape = provider.shape },
@@ -1233,7 +1425,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       -- post is judged from shifts with the camera, so one rebuild saw a
       -- post that the next did not)
       lampMemory = Bridge.lampMemory(provider.mapId),
-      kindMemo = Bridge.kindMemo(provider.mapId, MapW and MapW.world, provider.revision),
+      kindMemo = Bridge.kindMemo(provider.mapId, MapW and MapW.world, provider.revision, provider.def),
       town = Bridge.isTown(provider.def),
       reliefBlock = q.blk, reliefStep = q.step, round = roundOf(q),
       roofs = settings.roofs and isOutdoor(provider.def),
@@ -1250,6 +1442,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   if data then data:release() end
   if state.artStats then state.artTile, state.artShot = state.artStats() end
   Bridge.saveLamps()
+  Bridge.saveLearnedArt()
   local verts, idx, nv, ni, pieces
   if whole then
     -- in pieces, so only those in view are drawn
@@ -1306,7 +1499,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     local Map = Engine.get("src.core.game3.map")
     -- (the map may have changed while this was built: keep it for later)
     local e = { grid = grid, pieces = pieces, light = lightImage, verts = nv, tris = ni / 3,
-      key = whole.key, mapId = provider.mapId, used = love.timer.getTime(),
+      key = whole.key, cov = whole.cov, ready = whole.ready, mapId = provider.mapId, used = love.timer.getTime(),
       built = { mapId = provider.mapId, def = provider.def, revision = provider.revision,
         world = Map and Map.world, heightScale = settings.heightScale, lumps = settings.lumps,
         relief = reliefKey(q), sun = settings.sunShadows, roofs = settings.roofs, falls = settings.falls ~= false,
@@ -1321,6 +1514,18 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     state.wholeReady = true
     return
   end
+  -- (built for a map the view has since left: its coordinates are that
+  -- map's, and drawn as this one's it laid the last route's ground under
+  -- this town's picture -- the jumble walking into Oldale)
+  do
+    local now0 = Cells.provider()
+    if now0 and now0.mapId ~= provider.mapId then
+      state.viewDiscarded = (state.viewDiscarded or 0) + 1
+      if lightImage then lightImage:release() end
+      return false
+    end
+  end
+  state.viewFor = tostring(provider.mapId)
   dropReplaced()
   Scene.setTerrain(verts, idx, nv, ni, tick)
   Critters.setSpots(grid, HF.VOXEL)
@@ -1354,7 +1559,53 @@ function Bridge.renderPending(R)
   if state.lastMap ~= provider.mapId then
     state.lastMap = provider.mapId
     state.fz = nil
+    state.mapSwitchT = now()
+    state.seamElig = nil
   end
+  -- Just across a seam into the next map, the screen picture of a frame or
+  -- two still lies in the last map's coordinates: a mesh built from it then
+  -- read every cell's art from the wrong place (Oldale, walked into from
+  -- Route 102, stood as a jumble of raised paths until rebuilt), and tiles
+  -- learned from it would keep the wrong art.  Nothing new is started from
+  -- the picture until it has settled.
+  local settled = now() - (state.mapSwitchT or 0) > 0.25
+  -- (and the map's id and its data agree: walking across a seam the game
+  -- names the new map a moment before it hands over its layout, and the
+  -- new map's cells were read from the last map's layout -- Route 104's
+  -- trees and ponds under Petalburg's picture, Route 102's under Oldale's)
+  local defLate = false
+  do
+    state.defFor = state.defFor or setmetatable({}, { __mode = "k" })
+    local owner = provider.def and state.defFor[provider.def]
+    if owner and owner ~= provider.mapId then
+      settled = false
+      defLate = true
+      state.defMismatchT = now()
+      state.defMismatches = (state.defMismatches or 0) + 1
+    elseif provider.def then
+      state.defFor[provider.def] = provider.mapId
+    end
+  end
+  -- (and the picture's camera on the player: across a seam the field's
+  -- camera can lag behind the map switch for a while, the picture still
+  -- drawn around the last map's origin)
+  -- Told by the player's position against the picture's centre: walking,
+  -- they stay within a step of each other; when one of them has switched
+  -- to the new map's coordinates and the other not yet, they jump apart
+  -- by the maps' offset, and jump back when both have.
+  do
+    local ppx, ppy = playerFocus()
+    local fx0, fy0 = state.focusX, state.focusY
+    if ppx and fx0 then
+      local dx, dy = ppx - fx0, ppy - fy0
+      local l = state.camDelta
+      if l and (math.abs(dx - l[1]) > 48 or math.abs(dy - l[2]) > 48) then state.camJumpT = now() end
+      state.camDelta = { dx, dy }
+    end
+    if now() - (state.camJumpT or 0) < 0.3 then settled = false end
+    if now() - (state.misalignedT or -10) < 0.3 then settled = false end
+  end
+  state.settledNow = settled
 
   local fx, fy = state.focusX, state.focusY
   -- feet height under the focus, smoothed so surfing does not bob the camera
@@ -1388,7 +1639,18 @@ function Bridge.renderPending(R)
         state.shiftY = (state.shiftY or 0) + oy * CELL
         b0.x0, b0.x1, b0.y0, b0.y1 = b0.x0 + ox, b0.x1 + ox, b0.y0 + oy, b0.y1 + oy
         b0.mapId, b0.def = provider.mapId, provider.def
-        b0.world = nil -- different world list: rebuild soon, in the background
+        -- (a different world list: rebuild soon, in the background -- unless
+        -- the last map's mesh was a whole one, still covering the view: then
+        -- the new map's whole build replaces it, and no rebuild of the view
+        -- is started in between.  The view's rebuild right after a seam came
+        -- out wrong -- Oldale from Route 102 -- while the whole one is right.)
+        if b0.wholeOf then
+          b0.world = world
+          b0.revision = provider.revision
+          state.seamWhole = true
+        else
+          b0.world = nil
+        end
       end
     end
   end
@@ -1404,14 +1666,46 @@ function Bridge.renderPending(R)
   state.viewCells = view
   local fcx, fcy = math.floor(fx / CELL), math.floor(fy / CELL)
   local elig, why = false, nil
-  if not we and not state.wjob and state.wholeTried ~= provider.mapId .. "|" .. wkey then
+  local tnow = love.timer.getTime()
+  if not we and not state.wjob and state.wholeTried ~= provider.mapId .. "|" .. wkey
+      and tnow - (state.wholeAsked or 0) > 0.5 then
+    state.wholeAsked = tnow
     elig, why = wholeEligible(provider, view, fcx, fcy)
     state.wholeWhy = why
   end
-  if elig then
+  -- Ruby/Sapphire/Emerald: built again once many more of its tiles have
+  -- been seen (the one in use stays until the new one is ready)
+  -- (and any map once more of the maps around it have loaded: its margin
+  -- was built as border where they were still on their way)
+  if we and not state.wjob and settled and tnow - (state.wholeAsked or 0) > 2
+      and ((we.cov and we.cov < 0.97) or worldReady(world) > (we.ready or 0)) then
+    state.wholeAsked = tnow
+    local MapL = Engine.get("src.core.game3.map")
+    local b0 = we.built
+    local cov = we.cov and learnedCoverage(provider, Bridge.cachedCells(provider, MapL and MapL.world), b0.x0, b0.y0, b0.x1, b0.y1)
+    if cov then state.wholeCov = cov end
+    if worldReady(world) > (we.ready or 0)
+        or (cov and (cov >= we.cov + 0.08 or (cov >= 0.97 and cov > we.cov + 0.01))) then
+      local wx0, wy0, wx1, wy1 = wholeBounds(provider, view, fcx, fcy)
+      if wx0 then
+        -- (as far as the first: its margin was the view's reach then)
+        wx0, wy0 = math.min(wx0, we.built.x0), math.min(wy0, we.built.y0)
+        wx1, wy1 = math.max(wx1, we.built.x1), math.max(wy1, we.built.y1)
+        startJobIn("wjob", provider, p, wx0, wy0, wx1, wy1, { key = wkey, cov = cov, ready = worldReady(world) })
+      end
+    end
+  end
+  if elig and settled then
     state.wholeTried = provider.mapId .. "|" .. wkey
     local wx0, wy0, wx1, wy1 = wholeBounds(provider, view, fcx, fcy)
-    startJobIn("wjob", provider, p, wx0, wy0, wx1, wy1, { key = wkey })
+    -- (Ruby/Sapphire/Emerald: how much of all it covers is known, to tell
+    -- when enough more has been seen to build it again)
+    local cov = nil
+    if provider.family ~= "frlg" and isOutdoor(provider.def) then
+      local MapL = Engine.get("src.core.game3.map")
+      cov = learnedCoverage(provider, Bridge.cachedCells(provider, MapL and MapL.world), wx0, wy0, wx1, wy1)
+    end
+    startJobIn("wjob", provider, p, wx0, wy0, wx1, wy1, { key = wkey, cov = cov, ready = worldReady(world) })
     if WHOLE_DEBUG then print("whole: start", provider.mapId, wx0, wy0, wx1, wy1) end
   end
   -- (a whole build of a map left behind is dropped: its coordinates are
@@ -1423,13 +1717,36 @@ function Bridge.renderPending(R)
   local b = state.built
   local hard = not b or not state.grid or b.mapId ~= provider.mapId or b.def ~= provider.def
     or b.heightScale ~= settings.heightScale or b.lumps ~= settings.lumps
+  -- (no one-off build from a map whose data is not its own yet: the last
+  -- picture stays up for those frames)
+  if hard and defLate then
+    if canHold(R) then pcall(R.setWorldOverride, R, state.final) end
+    return
+  end
   if hard then
     state.job = nil
   elseif not state.job then
     -- start the next mesh in the background before it is needed: when the
     -- view comes within 3 cells of the old mesh's edge, or a tile changed
     local soon = needsRebuild(provider, world, cx0 - 3, cy0 - 3, cx1 + 3, cy1 + 3)
-    if soon then
+    -- Right after a seam, with the last map's whole mesh still up, the
+    -- view is not rebuilt at all while the new map's whole build is on its
+    -- way: a rebuild of the view right after a seam came out as a jumble
+    -- (Petalburg from Route 104, Oldale from Route 102) -- the whole one
+    -- never did.  (At most a few seconds; the view's edge may show the
+    -- flat map meanwhile.)
+    local seamHold = false
+    if soon and state.built and state.built.wholeOf and now() - (state.mapSwitchT or 0) < 5 then
+      state.seamElig = state.seamElig or {}
+      local e = state.seamElig[provider.mapId]
+      if e == nil then
+        e = wholeEligible(provider, { cx0, cy0, cx1, cy1 }, math.floor(fx / CELL), math.floor(fy / CELL)) and true or false
+        state.seamElig[provider.mapId] = e
+      end
+      seamHold = e
+      if seamHold then state.seamHolds = (state.seamHolds or 0) + 1 end
+    end
+    if soon and settled and not seamHold then
       startJob(provider, p, cx0 - REBUILD_SLACK, cy0 - REBUILD_SLACK,
         cx1 + REBUILD_SLACK, cy1 + REBUILD_SLACK)
     end
@@ -2129,6 +2446,7 @@ function Bridge.install()
             if we then
               local dn, all = Scene.piecesDrawn()
               wtxt = ("whole map: in use, pieces %d/%d, built in %d ms"):format(dn, all, math.floor(we.ms or 0))
+              if we.cov then wtxt = wtxt .. (", tiles seen %d%%"):format(math.floor(we.cov * 100)) end
             elseif state.wjob then
               wtxt = ("whole map: building (%d ms so far)"):format(math.floor(state.wjob.work * 1000))
             else
@@ -2142,6 +2460,7 @@ function Bridge.install()
                 wtxt = "whole map: no" .. (state.wholeWhy and (" (" .. state.wholeWhy .. ")") or "")
               end
             end
+            if state.settledNow == false then wtxt = wtxt .. "  (seam: waiting for the picture)" end
             text = text .. "\n" .. wtxt
           end
           text = text .. ("\nmap type %s  kind %s  env %s  water/grass %s  outdoor %s"):format(

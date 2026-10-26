@@ -238,7 +238,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- impassable lawn from a wall looks at up to 48 cells around, and the
     -- runs reach forty cells past the window -- every rebuild while walking
     -- did it all again, and the game stuttered)
-    local mkey2 = kindMemo and ((cy + 32768) * 65536 + (cx + 32768))
+    -- (not the border tiling past the loaded maps: a neighbour still
+    -- loading reads as border for a moment)
+    local mkey2 = kindMemo and not c.border and ((cy + 32768) * 65536 + (cx + 32768))
     if mkey2 then
       local m = kindMemo[mkey2]
       if m then effective[key] = m; return m end

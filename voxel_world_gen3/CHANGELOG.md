@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.29.0
+
+- Build ahead in Ruby, Sapphire and Emerald too.  Their tilesets' own art
+  never matched what the screen shows, so the mod now learns each map
+  tile's art from the screen: the first time a whole tile is on screen,
+  its picture is kept -- and remembered on disk, so a tile seen once is
+  known for good -- and stands in for the screen wherever that tile lies
+  beyond it.  A map is built ahead once most of its tiles have been seen
+  (on a first visit, after a short walk; after that, at once), and built
+  again in the background when many more have been -- counting the
+  margin into the maps around it too: Route 102 built before Oldale had
+  been seen showed Oldale as a jumble of raised paths as you walked in.
+- Walking across a seam into the next map (Route 104 into Petalburg,
+  Route 102 into Oldale) no longer shows the town as a jumble of raised
+  paths and flat buildings for a second or two.  Several things there are
+  now checked before anything is built: that the game has handed over the
+  new map's data (it names the new map a moment before), that the
+  picture matches the tiles already known, and that a mesh started for
+  the last map is not shown as this one's.  And right after a seam the
+  view is not rebuilt at all while the new map's whole build is on its
+  way: the last map's mesh stays up until it is ready.
+- The view's own meshes use the learned art beyond the screen as well:
+  checked on every Emerald map, far fewer cells change as you walk
+  (Route 104: 57 to 11, Route 119: 47 to 16, Rustboro: 24 to 11).
+- PERF STATS: "tiles seen 85%" on a map built ahead in these games, or
+  why it is not built yet ("seen 40% of its tiles, needs 60%").
+
 ## 1.28.0
 
 - Build ahead.  Until now the 3D map was rebuilt around you every few
