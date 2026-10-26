@@ -475,12 +475,20 @@ local function fill(name, verts, nv, idx, ni)
   m.count = nv
 end
 
+local terrainPieces = nil
+local cullRect = nil
+
 -- With `tick`, the upload is done into a fresh mesh in chunks (tick may
 -- yield to the next frame between them) and only swapped in when complete,
 -- so the old terrain keeps drawing while the new one is uploaded.
+-- (A whole map's pieces stop drawing only once the new terrain is in: they
+-- were dropped at the start -- or rather meant to be: declared below this
+-- function, terrainPieces here was a global, and a whole map's pieces kept
+-- drawing over every view mesh after it.  Released under it by bridge.lua,
+-- that was the black screen of the 1.30.1 test.)
 function Scene.setTerrain(verts, idx, nv, ni, tick)
-  terrainPieces = nil
   if not tick or nv == 0 then
+    terrainPieces = nil
     return fill("terrain", verts, nv, idx, ni)
   end
   local mesh = love.graphics.newMesh(Scene.FORMAT, nv, "triangles", "dynamic")
@@ -496,6 +504,7 @@ function Scene.setTerrain(verts, idx, nv, ni, tick)
   mesh:setDrawRange(1, ni)
   local old = meshes.terrain
   meshes.terrain = { mesh = mesh, capacity = nv, count = nv }
+  terrainPieces = nil
   if old and old.mesh then old.mesh:release() end
 end
 
@@ -503,8 +512,7 @@ end
 -- pieces in view are drawn: all of Route 24 every frame would cost more than
 -- the rebuilds it saves.  A piece: { mesh, count, x0, y0, x1, y1 } (mesh
 -- space px).  Pieces belong to the caller, who releases them.
-local terrainPieces = nil
-local cullRect = nil
+-- (terrainPieces is declared above Scene.setTerrain)
 
 function Scene.makePiece(verts, idx, nv, ni, tick, x0, y0, x1, y1)
   if nv == 0 then return { count = 0, x0 = x0, y0 = y0, x1 = x1, y1 = y1 } end
@@ -950,6 +958,12 @@ function Scene.render(p)
   send("uProj", "row", p.proj)
   send("uFog", { p.fog[1], p.fog[2], p.fog[3], p.fogStrength or 1 })
   send("uFogRange", { p.fogStart, p.fogEnd })
+  -- (never a light released under it: drawn without one instead of failing
+  -- the whole frame)
+  if lightImage and not pcall(lightImage.getWidth, lightImage) then
+    lightImage, lightRect = nil, nil
+    Scene.lostLight = (Scene.lostLight or 0) + 1
+  end
   local lit = p.light ~= false and lightImage ~= nil
   send("uLight", lit and lightImage or white())
   send("uLightRect", lit and lightRect or { 0, 0, 1, 1 })

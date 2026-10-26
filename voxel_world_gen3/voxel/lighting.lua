@@ -32,7 +32,9 @@ function Lighting.bake(grid, VOXEL, opts)
   if grid.roofs and #grid.roofs > 0 then
     local R = {}
     for i = 1, vcols * vrows do R[i] = H[i] end
+    tick()
     for _, r in ipairs(grid.roofs) do
+      tick()
       local ew = r.ridge == "ew"
       local rise = ew and math.min(r.maxRise, math.floor((r.y1 - r.y0) * 0.33 + 0.5))
         or math.min(r.maxRise, math.floor((r.x2 - r.x1) * 0.18 + 0.5))
@@ -65,6 +67,9 @@ function Lighting.bake(grid, VOXEL, opts)
     local h = H[i]
     if h > maxH then maxH = h end
   end
+  tick()
+  -- (every pass over all of a whole map's voxels gives the frame back row by
+  -- row: these ran unbroken, tens of milliseconds on a phone)
 
   -- the highest height within two voxels of each one (a separable max):
   -- where nothing around stands above a top, it has no occlusion to add up
@@ -72,6 +77,7 @@ function Lighting.bake(grid, VOXEL, opts)
   do
     local R5 = {}
     for vy = 0, vrows - 1 do
+      tick()
       local b = vy * vcols
       for vx = 0, vcols - 1 do
         local m = H[b + vx + 1]
@@ -87,6 +93,7 @@ function Lighting.bake(grid, VOXEL, opts)
     end
     M5 = {}
     for vy = 0, vrows - 1 do
+      tick()
       for vx = 0, vcols - 1 do
         local m = R5[vy * vcols + vx + 1]
         for dy = -2, 2 do
@@ -263,7 +270,7 @@ function Lighting.imageData(grid, tick)
   local SUN, AO, GLOW = grid.sun, grid.ao, grid.glow
   local SH = grid.shore
   for y = 0, h - 1 do
-    if y % 16 == 0 then tick() end
+    tick()
     local row = y * w
     for x = 0, w - 1 do
       local k = row + x + 1

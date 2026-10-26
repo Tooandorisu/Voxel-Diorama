@@ -54,6 +54,7 @@ local SLOT_COLS, SLOT_ROWS = 12, 4
 -- character's cell touches, behind one it is standing inside (a doorway)
 local FOOT_INSET = 4
 -- how far north of the player is ever meshed comes from the quality preset
+local WHOLE_DEBUG = false
 local REBUILD_SLACK = 5 -- cells of margin around what the camera needs
 
 Bridge.PITCH = { 0, 30, 45, 55 } -- OFF, LOW, MID, HIGH
@@ -90,6 +91,7 @@ local settings = {
   caveFx = true, -- dust in the air and dripping water in caves, a warm Flash glow
   falls = true, -- waterfalls as sloping sheets of streaming water, mist and spray at the foot
   wholeMaps = true, -- build a whole (small enough) map ahead in the background, then stop rebuilding
+  nearMaps = true, -- and the maps next to it, while frames have time to spare
   yaw = 0, -- camera turn in degrees (+ = swing east / RIGHT, - = west / LEFT)
   fov = 30,
 }
@@ -526,13 +528,27 @@ end
 -- behaviour: a few lookups each), remembered while the map, the maps around
 -- it and its metatiles stay the same -- every rebuild while walking read
 -- thousands of them again, the runs now looking forty cells past the view
+-- (one per map, the current one and the neighbours being built ahead, so
+-- building a neighbour does not throw away the current map's)
+local function trimCaches(caches, keep)
+  local ids = {}
+  for id, c in pairs(caches) do ids[#ids + 1] = { id = id, t = c.used or 0 } end
+  if #ids <= keep then return end
+  table.sort(ids, function(a, b) return a.t > b.t end)
+  for i = keep + 1, #ids do caches[ids[i].id] = nil end
+end
+
 function Bridge.cachedCells(provider, world)
-  local m = state.cellCache
-  if not m or m.mapId ~= provider.mapId or m.world ~= world or m.revision ~= provider.revision
-      or m.def ~= provider.def then
-    m = { mapId = provider.mapId, world = world, revision = provider.revision, def = provider.def, t = {}, n = 0 }
-    state.cellCache = m
+  state.cellCaches = state.cellCaches or {}
+  local key = tostring(provider.mapId)
+  local m = state.cellCaches[key]
+  if not m or m.world ~= world or m.revision ~= provider.revision or m.def ~= provider.def then
+    m = { mapId = provider.mapId, world = world, revision = provider.revision, def = provider.def, t = {}, n = 0,
+      used = love.timer and love.timer.getTime() or 0 }
+    state.cellCaches[key] = m
+    trimCaches(state.cellCaches, 4)
   end
+  m.used = love.timer and love.timer.getTime() or 0
   local t, cell = m.t, provider.cell
   return function(cx, cy)
     local key = (cy + 32768) * 65536 + (cx + 32768)
@@ -567,10 +583,16 @@ end
 Bridge._worldReady = worldReady
 
 function Bridge.kindMemo(mapId, world, revision, def)
-  local m = state.kindMemo
+  state.kindMemos = state.kindMemos or {}
+  local key = tostring(mapId)
+  local m = state.kindMemos[key]
   local ready = worldReady(world)
-  if not m or m.mapId ~= mapId or m.world ~= world or m.revision ~= revision or m.ready ~= ready or m.def ~= def then
-    m = { mapId = mapId, world = world, revision = revision, ready = ready, def = def, t = {} }
+  if m then m.used = love.timer and love.timer.getTime() or 0 end
+  if not m or m.world ~= world or m.revision ~= revision or m.ready ~= ready or m.def ~= def then
+    m = { mapId = mapId, world = world, revision = revision, ready = ready, def = def, t = {},
+      used = love.timer and love.timer.getTime() or 0 }
+    state.kindMemos[key] = m
+    trimCaches(state.kindMemos, 4)
     state.kindMemo = m
   end
   return m.t
@@ -627,6 +649,10 @@ end
 -- known for good.  [pair:mid] = { r, g, b, r, g, b, ... } (16 blocks).
 local ART_FILE = "tileart/v3.txt" -- (v1: test builds that could learn from a mismatched screen)
 local learnedArt, learnedCount, learnedSaved, learnedSavedAt = nil, 0, 0, 0
+-- the file's lines, kept as read or written: a tile's art never changes once
+-- learned, so a save only encodes the new ones (encoding all of them again,
+-- thousands of tiles, was a 60-110 ms hitch on a phone every save)
+local learnedLines, learnedLine = {}, {}
 
 function Bridge.learnedArt()
   if learnedArt then return learnedArt end
@@ -640,6 +666,10 @@ function Bridge.learnedArt()
           for i = 1, 48 do t[i] = tonumber(hex:sub(i * 2 - 1, i * 2), 16) / 255 end
           learnedArt[key] = t
           learnedCount = learnedCount + 1
+          if not learnedLine[key] then
+            learnedLine[key] = true
+            learnedLines[#learnedLines + 1] = key .. "\t" .. hex
+          end
         end
       end
     end
@@ -654,14 +684,15 @@ function Bridge.saveLearnedArt(force)
   local t = love.timer and love.timer.getTime() or 0
   if not force and learnedCount - learnedSaved < 40 and t - learnedSavedAt < 30 then return end
   learnedSaved, learnedSavedAt = learnedCount, t
-  local lines = {}
   for key, v in pairs(learnedArt) do
-    local hex = {}
-    for i = 1, 48 do hex[i] = string.format("%02x", math.floor(v[i] * 255 + 0.5)) end
-    lines[#lines + 1] = key .. "\t" .. table.concat(hex)
+    if not learnedLine[key] then
+      local hex = {}
+      for i = 1, 48 do hex[i] = string.format("%02x", math.floor(v[i] * 255 + 0.5)) end
+      learnedLine[key] = true
+      learnedLines[#learnedLines + 1] = key .. "\t" .. table.concat(hex)
+    end
   end
-  table.sort(lines)
-  pcall(lampCache.write, lampCache, ART_FILE, table.concat(lines, "\n") .. "\n")
+  pcall(lampCache.write, lampCache, ART_FILE, table.concat(learnedLines, "\n") .. "\n")
 end
 
 local function artKey(c)
@@ -1017,9 +1048,14 @@ end
 -- slot: "job" (the view's next mesh) or "wjob" (a whole map, built ahead)
 local function startJobIn(slot, ...)
   local args = { ... }
-  local job = { started = love.timer.getTime(), work = 0 }
+  local job = { started = love.timer.getTime(), work = 0, frames = 0,
+    mapId = args[1] and args[1].mapId, neighbour = args[7] and args[7].neighbour }
   local function tick()
-    if love.timer.getTime() > job.deadline then coroutine.yield() end
+    local t = love.timer.getTime()
+    if WHOLE_DEBUG and job.lastTick and t - job.lastTick > 0.008 then
+      print(("long gap %.1f ms"):format((t - job.lastTick) * 1000), tostring(state.phase), tostring(job.neighbour))
+    end
+    if t > job.deadline then coroutine.yield(); job.lastTick = love.timer.getTime() else job.lastTick = t end
   end
   job.co = coroutine.create(function() rebuildInner(tick, unpack(args)) end)
   state[slot] = job
@@ -1031,9 +1067,17 @@ local function stepJobIn(slot, budget)
   if not job then return end
   local t0 = love.timer.getTime()
   job.deadline = t0 + budget
+  local ph0 = state.phase
   local ok, err = coroutine.resume(job.co)
   local spent = love.timer.getTime() - t0
   job.work = job.work + spent
+  job.frames = job.frames + 1
+  -- (which part of the build the longest slice was in, for PERF STATS)
+  if spent > (job.worst or 0) then
+    job.worst = spent
+    local ph1 = tostring(state.phase)
+    job.worstIn = (ph0 == nil or ph0 == ph1) and ph1 or (tostring(ph0) .. ">" .. ph1)
+  end
   state.tJobFrame = (state.tJobFrame or 0) + spent * 1000
   if not ok then
     state[slot] = nil
@@ -1043,8 +1087,17 @@ local function stepJobIn(slot, budget)
     if state[slot] == job then state[slot] = nil end
     if slot == "job" then state.tMesh = job.work * 1000 end -- total work, spread over many frames
     if slot == "wjob" then
+      if WHOLE_DEBUG then print("wjob done", job.mapId, job.neighbour, job.work) end
       state.tWhole = job.work * 1000
-      for _, e in pairs(state.wholeCache) do if not e.ms then e.ms = state.tWhole end end
+      for _, e in pairs(state.wholeCache) do
+        if not e.ms then e.ms, e.frames, e.worst = state.tWhole, job.frames, (job.worst or 0) * 1000 end
+      end
+      if job.neighbour then
+        if WHOLE_DEBUG then print("near: done", job.mapId, job.work, job.frames, job.worst, job.worstIn) end
+        state.nearDone = (state.nearDone or 0) + 1
+        state.nearLast = ("%s %d ms over %d frames, worst %.1f ms (%s)"):format(tostring(job.mapId),
+          math.floor(job.work * 1000), job.frames, (job.worst or 0) * 1000, tostring(job.worstIn))
+      end
     end
   end
 end
@@ -1070,9 +1123,16 @@ local PIECE = 24          -- cells per drawn piece
 -- the map's edge: on a wide phone held sideways that is 30-40 cells to
 -- each side.  A fixed 16 left a small route never covered.)
 local WHOLE_MAX = 16000   -- cells in all (map and margin): bigger maps keep the view's meshes
-local WHOLE_KEEP = 3      -- maps kept
+local WHOLE_KEEP = 5      -- maps kept: the current one and its neighbours first
+-- Neighbours built ahead: the maps next to the current one, built whole in
+-- their own coordinates while you walk, so crossing into one finds it done.
+-- Only when the frame has time to spare: paused the moment frames slow down.
+local NEAR_REACH = 40      -- cells from the player to a neighbour's edge
+local NEAR_BUDGET = 0.002  -- seconds a frame
+local NEAR_FRAME_OK = 1 / 50 -- average frame time below this...
+local NEAR_FRAME_MAX = 1 / 30-- ...and no frame above this in the last second
+local NEAR_SETTLE = 3      -- seconds after arriving on a map before starting
 local WHOLE_BUDGET = 0.003
-local WHOLE_DEBUG = false
 
 local function tileArtReady()
   local all = state.artCheck and state.artCheck._all
@@ -1198,7 +1258,12 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   -- the same -- thousands of cells -- with the screen's own blocks.)
   local g4x, g4y = math.floor(gx / 4) * 4, math.floor(gy / 4) * 4
   local rx, ry = gx - g4x, gy - g4y
-  local okD, d = pcall(function()
+  -- (a neighbour built ahead has no picture of its own: it lies in another
+  -- map's coordinates, off the screen -- tileset or learned art only)
+  local neighbour = whole and whole.neighbour
+  state.phase = 'start'
+  local okD, d = false, nil
+  if not neighbour then okD, d = pcall(function()
     local probe = ensure("probe", qw, qh)
     love.graphics.push("all")
     love.graphics.setCanvas(probe)
@@ -1218,7 +1283,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     love.graphics.draw(state.ground, (rx - 0.5) / 4, (ry - 0.5) / 4, 0, 0.25, 0.25)
     love.graphics.pop()
     return probe:newImageData()
-  end)
+  end) end
   if okD then data = d end
   local shot = nil
   if data then
@@ -1357,6 +1422,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   end
   -- Ruby/Sapphire/Emerald: the capture, then the art learned from it
   if settings.tileArt ~= false and provider.family ~= "frlg" then
+    state.phase = 'art'
     local MapL = Engine.get("src.core.game3.map")
     local cellOf = Bridge.cachedCells(provider, MapL and MapL.world)
     local art = Bridge.learnedArt()
@@ -1418,6 +1484,8 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   end
   local q = preset()
   local MapW = Engine.get("src.core.game3.map")
+  state.phase = 'hf'
+  if WHOLE_DEBUG then HF._mark = function(n) state.phase = 'hf' .. n end end
   local grid = HF.build({ cell = Bridge.cachedCells(provider, MapW and MapW.world), color = color, shape = provider.shape },
     x0, y0, x1 - x0 + 1, y1 - y0 + 1,
     { heightScale = settings.heightScale, lumps = settings.lumps, tick = tick,
@@ -1441,8 +1509,12 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
         or (tonumber(provider.def and provider.def.cave) or 0) > 0 })
   if data then data:release() end
   if state.artStats then state.artTile, state.artShot = state.artStats() end
+  if tick then tick() end
+  state.phase = 'save'
   Bridge.saveLamps()
   Bridge.saveLearnedArt()
+  if tick then tick() end
+  state.phase = 'mesh'
   local verts, idx, nv, ni, pieces
   if whole then
     -- in pieces, so only those in view are drawn
@@ -1452,11 +1524,13 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       for vx = 0, grid.vcols - 1, PV do
         local pv, pidx, pn, pni = Mesher.build(grid, HF.VOXEL, tick, { vx, vy, vx + PV, vy + PV })
         local px0, py0 = grid.px + vx * HF.VOXEL, grid.py + vy * HF.VOXEL
+        state.phase = 'piece'
         -- (bounds padded: a roof or a waterfall reaches past its corner,
         -- and tall things lean north into view)
         pieces[#pieces + 1] = Scene.makePiece(pv, pidx, pn, pni, tick,
           px0 - 64, py0 - 96, px0 + PV * HF.VOXEL + 64, py0 + PV * HF.VOXEL + 32)
         nv, ni = nv + pn, ni + pni
+        state.phase = 'mesh'
       end
     end
   else
@@ -1471,6 +1545,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     local key = sunKeyFor(provider.def)
     local s = (key ~= "noon") and DayNight.sunOf(key) or nil
     local indoor = not isOutdoor(provider.def)
+    state.phase = 'light'
     Lighting.bake(grid, HF.VOXEL, { tick = tick,
       -- no sun at night: ambient occlusion only.  Indoors the room's own
       -- light, high up toward the back wall: furniture throws a soft
@@ -1479,6 +1554,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       sunX = indoor and 0.1 or (s and s.sunX), sunY = indoor and 0.38 or (s and s.sunY),
       room = indoor and grid.room ~= nil })
     state.bakedSunKey = key
+    state.phase = 'lightimg'
     local okL, img = pcall(function()
       local d = Lighting.imageData(grid, tick)
       local im = love.graphics.newImage(d)
@@ -1491,6 +1567,7 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     if tick then tick() end
   end
   if whole then
+    state.phase = 'keep'
     -- kept for a while: only what is still asked of it once meshed and lit
     -- (where characters stand, the roofs for the chimneys, the waterfalls,
     -- the lamps...) -- the texture rows, shades and flags of every voxel
@@ -1507,10 +1584,23 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     evictWhole(provider.mapId)
     state.wholeCache[provider.mapId] = e
     -- keep the last few
+    -- (the one in use and the maps around the current one go last)
+    local MapK = Engine.get("src.core.game3.map")
+    local around = {}
+    for _, en in ipairs(MapK and MapK.world or {}) do around[tostring(en.id)] = true end
     local ids = {}
-    for id, o in pairs(state.wholeCache) do ids[#ids + 1] = { id = id, t = o.used } end
+    for id, o in pairs(state.wholeCache) do
+      local t = o.used or 0
+      if state.built and state.built.wholeOf == o then t = t + 2e9
+      elseif MapK and tostring(id) == tostring(MapK.current) then t = t + 2e9
+      elseif around[tostring(id)] then t = t + 1e9 end
+      ids[#ids + 1] = { id = id, t = t }
+    end
     table.sort(ids, function(a, b) return a.t > b.t end)
-    for i = WHOLE_KEEP + 1, #ids do evictWhole(ids[i].id) end
+    local keep = WHOLE_KEEP
+    local qn = preset().name
+    if qn == "POTATO" or qn == "AUTO-3" then keep = 3 end
+    for i = keep + 1, #ids do evictWhole(ids[i].id) end
     state.wholeReady = true
     return
   end
@@ -1526,13 +1616,17 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     end
   end
   state.viewFor = tostring(provider.mapId)
-  dropReplaced()
+  -- (the whole map it replaces is released only once this is in: the upload
+  -- below gives the frame back between chunks, and released before it, its
+  -- light and pieces were drawn in between -- "Cannot use object after it
+  -- has been released", then black until the next whole map was in)
   Scene.setTerrain(verts, idx, nv, ni, tick)
   Critters.setSpots(grid, HF.VOXEL)
   Smoke.setStacks(grid)
   Falls.setFalls(grid, state.fallsMap == provider.mapId)
   state.fallsMap = provider.mapId
   Scene.setLight(lightImage, grid.px, grid.py, grid.vcols * HF.VOXEL, grid.vrows * HF.VOXEL)
+  dropReplaced()
   local Map = Engine.get("src.core.game3.map")
   state.grid = grid
   state.shiftX, state.shiftY = 0, 0
@@ -1543,6 +1637,71 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     sunKey = state.bakedSunKey or sunKeyFor(provider.def),
     x0 = x0, y0 = y0, x1 = x1, y1 = y1,
   }
+end
+
+-- The neighbour of the current map nearest the player that is not built yet
+-- (and can be): built whole, in its own coordinates, with the maps around it
+-- placed relative to it the way they will be once it is the current map.
+function Bridge.startNeighbour(provider, p, world, view, fcx, fcy)
+  state.nearTried = state.nearTried or {}
+  local best, bestD
+  for _, en in ipairs(world or {}) do
+    local d = en.def
+    local L = d and d.midLayout
+    local w, h = L and (L.trueWidth or L.width), L and (L.trueHeight or L.height)
+    if w and h and L.midAt and tostring(en.id) ~= tostring(provider.mapId) then
+      local ox, oy = en.ox or 0, en.oy or 0
+      local dx = math.max(0, ox - fcx, fcx - (ox + w - 1))
+      local dy = math.max(0, oy - fcy, fcy - (oy + h - 1))
+      local dist = math.max(dx, dy)
+      local tried = state.nearTried[tostring(en.id)]
+      if dist <= NEAR_REACH and not (tried and now() - tried < 10) and (not bestD or dist < bestD) then
+        best, bestD = en, dist
+      end
+    end
+  end
+  if not best then state.nearNote = nil return end
+  -- its world: the current map and the others, placed relative to it
+  local nb = state.nbWorlds and state.nbWorlds[tostring(best.id)]
+  if not (nb and nb.src == world) then
+    local list = { { id = provider.mapId, def = provider.def, ox = -(best.ox or 0), oy = -(best.oy or 0) } }
+    for _, en in ipairs(world) do
+      if en ~= best then
+        list[#list + 1] = { id = en.id, def = en.def, ox = (en.ox or 0) - (best.ox or 0), oy = (en.oy or 0) - (best.oy or 0) }
+      end
+    end
+    nb = { src = world, list = list }
+    state.nbWorlds = { [tostring(best.id)] = nb }
+  end
+  local np = Cells.providerFor and Cells.providerFor(best.id, best.def, nb.list)
+  state.nearTried[tostring(best.id)] = now()
+  if not np then return end
+  local key = wholeKey(np)
+  local have = state.wholeCache[best.id]
+  if have and have.key == key then return end
+  -- (in its own coordinates: the view's reach the same, the player not on it)
+  local vw = { view[1] - (best.ox or 0), view[2] - (best.oy or 0), view[3] - (best.ox or 0), view[4] - (best.oy or 0) }
+  local ok, why = wholeEligible(np, vw, fcx - (best.ox or 0), fcy - (best.oy or 0))
+  -- (FireRed/LeafGreen: its tileset must be loaded, or it would be built
+  -- without its art)
+  if ok and np.family == "frlg" and isOutdoor(np.def) then
+    local L = best.def.midLayout
+    local info = np.cell(math.floor((L.trueWidth or L.width) / 2), math.floor((L.trueHeight or L.height) / 2))
+    if not (info and np.tilePixel(info, 8, 8)) then ok, why = false, "tileset not loaded" end
+  end
+  if not ok then
+    state.nearNote = ("%s: %s"):format(tostring(best.id), tostring(why))
+    if WHOLE_DEBUG then print("near: not", best.id, why) end
+    return
+  end
+  local wx0, wy0, wx1, wy1 = wholeBounds(np, vw, fcx - (best.ox or 0), fcy - (best.oy or 0))
+  local cov = nil
+  if np.family ~= "frlg" and isOutdoor(np.def) then
+    cov = learnedCoverage(np, Bridge.cachedCells(np, world), wx0, wy0, wx1, wy1)
+  end
+  startJobIn("wjob", np, p, wx0, wy0, wx1, wy1, { key = key, cov = cov, ready = worldReady(nb.list), neighbour = true })
+  if WHOLE_DEBUG then print("near: start", best.id, wx0, wy0, wx1, wy1, cov) end
+  state.nearNote = nil
 end
 
 function Bridge.renderPending(R)
@@ -1667,6 +1826,23 @@ function Bridge.renderPending(R)
   local fcx, fcy = math.floor(fx / CELL), math.floor(fy / CELL)
   local elig, why = false, nil
   local tnow = love.timer.getTime()
+  -- Crossed into the neighbour being built: it is this map's own build now,
+  -- carried on where it was (1.30.0 test: it was dropped here and started
+  -- over -- Petalburg, Route 102 built twice)
+  if state.wjob and state.wjob.neighbour and tostring(state.wjob.mapId) == tostring(provider.mapId) then
+    state.wjob.neighbour = false
+    state.wholeTried = provider.mapId .. "|" .. wkey
+    state.nearTaken = (state.nearTaken or 0) + 1
+  end
+  -- (the current map comes first: a neighbour's build gives way to it, and
+  -- is taken up again later)
+  if not we and state.wjob and state.wjob.neighbour and state.wholeTried ~= provider.mapId .. "|" .. wkey then
+    state.nearTried = state.nearTried or {}
+    state.nearTried[tostring(state.wjob.mapId)] = nil
+    state.wjob = nil
+    state.nearYield = (state.nearYield or 0) + 1
+    if WHOLE_DEBUG then print("near: yield") end
+  end
   if not we and not state.wjob and state.wholeTried ~= provider.mapId .. "|" .. wkey
       and tnow - (state.wholeAsked or 0) > 0.5 then
     state.wholeAsked = tnow
@@ -1710,8 +1886,16 @@ function Bridge.renderPending(R)
   end
   -- (a whole build of a map left behind is dropped: its coordinates are
   -- that map's)
-  if state.wjob and state.wjobMap and state.wjobMap ~= provider.mapId then state.wjob = nil end
-  state.wjobMap = state.wjob and (state.wjobMap or provider.mapId) or nil
+  -- (a whole build of a map no longer around is dropped -- a neighbour
+  -- built ahead keeps going while it is one, and once you cross into it)
+  if state.wjob and state.wjob.mapId ~= nil and tostring(state.wjob.mapId) ~= tostring(provider.mapId) then
+    local around = false
+    for _, en in ipairs(world or {}) do
+      if tostring(en.id) == tostring(state.wjob.mapId) then around = true break end
+    end
+    if not around then state.wjob = nil end
+  end
+  state.wjobMap = state.wjob and state.wjob.mapId or nil
 
   -- a different map (a warp), a changed setting or no mesh at all: build now
   local b = state.built
@@ -1753,7 +1937,38 @@ function Bridge.renderPending(R)
   end
   state.gap = state.job ~= nil and needsRebuild(provider, world, cx0, cy0, cx1, cy1)
   if state.job then stepJob() end
-  if state.wjob and not hard then stepJobIn("wjob", WHOLE_BUDGET) end
+  -- frame times, for pausing the neighbours
+  do
+    local dt = love.timer.getDelta and love.timer.getDelta() or 1 / 60
+    state.frameAvg = state.frameAvg and (state.frameAvg * 0.95 + dt * 0.05) or dt
+    if dt > NEAR_FRAME_MAX then state.slowT = now() end
+    -- hitches while walking: frames over 33 ms, the last 30 s
+    state.hitches = state.hitches or {}
+    if dt > 1 / 30 and not hard then state.hitches[#state.hitches + 1] = now() end
+    while state.hitches[1] and now() - state.hitches[1] > 30 do table.remove(state.hitches, 1) end
+  end
+  local frameOk = (state.frameAvg or 0) < NEAR_FRAME_OK and now() - (state.slowT or -10) > 1
+  if state.wjob and not hard then
+    if not state.wjob.neighbour then
+      stepJobIn("wjob", WHOLE_BUDGET)
+    elseif frameOk and not state.job then
+      stepJobIn("wjob", NEAR_BUDGET)
+      state.nearPaused = nil
+    else
+      state.nearPaused = state.job and "view rebuilding" or ("frame %.0f ms"):format((state.frameAvg or 0) * 1000)
+    end
+  end
+  -- the next neighbour to build ahead
+  if not state.wjob and not state.job and not hard and settled and frameOk
+      and settings.nearMaps ~= false and settings.wholeMaps ~= false
+      and now() - (state.mapSwitchT or 0) > NEAR_SETTLE
+      and (state.wholeCache[provider.mapId] or state.wholeWhy) then
+    local qn = preset().name
+    if qn ~= "POTATO" and qn ~= "AUTO-3" and now() - (state.nearAsked or 0) > 1 then
+      state.nearAsked = now()
+      Bridge.startNeighbour(provider, p, world, { cx0, cy0, cx1, cy1 }, math.floor(fx / CELL), math.floor(fy / CELL))
+    end
+  end
   if state.wholeReady then
     -- just finished: take it now if the view is on it
     state.wholeReady = nil
@@ -1762,7 +1977,9 @@ function Bridge.renderPending(R)
       print("whole: ready", e and e.key == wkey, cx0, cy0, cx1, cy1, e and e.built.x0, e and e.built.y0, e and e.built.x1, e and e.built.y1)
     end
     local e = state.wholeCache[provider.mapId]
-    if e and e.key == wkey and wholeCovers(e, cx0, cy0, cx1, cy1) and not state.job then
+    if e and state.built and state.built.wholeOf == e then
+      -- (a neighbour finished: the current map's own is already up)
+    elseif e and e.key == wkey and wholeCovers(e, cx0, cy0, cx1, cy1) and not state.job then
       installWhole(e, provider, world)
     elseif e and e.key == wkey and wholeCovers(e, cx0, cy0, cx1, cy1) then
       state.job = nil
@@ -2473,6 +2690,22 @@ function Bridge.install()
             end
             if state.settledNow == false then wtxt = wtxt .. "  (seam: waiting for the picture)" end
             text = text .. "\n" .. wtxt
+            -- neighbours built ahead: kept maps, the one building (or why
+            -- not), the last one done, frames over 33 ms in the last 30 s
+            local kept, kv = 0, 0
+            for _, e in pairs(state.wholeCache) do kept, kv = kept + 1, kv + (e.verts or 0) end
+            local ntxt = ("near: kept %d maps (%dk verts), built %d"):format(kept, math.floor(kv / 1000), state.nearDone or 0)
+            if state.wjob and state.wjob.neighbour then
+              ntxt = ntxt .. (", building %s %d ms"):format(tostring(state.wjob.mapId), math.floor(state.wjob.work * 1000))
+              if state.nearPaused then ntxt = ntxt .. " (paused: " .. state.nearPaused .. ")" end
+            elseif settings.nearMaps == false then
+              ntxt = ntxt .. ", off"
+            elseif state.nearNote then
+              ntxt = ntxt .. ", next " .. state.nearNote
+            end
+            if state.nearLast then ntxt = ntxt .. "  last: " .. state.nearLast end
+            ntxt = ntxt .. ("  hitches %d/30s  frame %.1f ms"):format(#(state.hitches or {}), (state.frameAvg or 0) * 1000)
+            text = text .. "\n" .. ntxt
           end
           text = text .. ("\nmap type %s  kind %s  env %s  water/grass %s  outdoor %s"):format(
             tostring(def.mapType), tostring(def.kind), tostring(def.environment),

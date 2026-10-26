@@ -40,6 +40,7 @@ voxels.
 | CAVE ATMOSPHERE | on / off | dust in the air and dripping water in caves; the Flash circle glows warm like a torch |
 | WATERFALLS | on / off | waterfalls fall from the cliff tops as sheets of streaming water, with mist, spray and froth where they land |
 | BUILD AHEAD | on / off | builds the whole map in the background (in Ruby/Sapphire/Emerald once most of its tiles have been on screen; maps up to about Saffron's size), then stops rebuilding while you walk: no stutter, nothing changes shape |
+| BUILD NEIGHBOURS | on / off | also builds the maps next to the current one in the background, while frames have time to spare, so crossing into one is seamless |
 | CAMERA TURN | LEFT 30 / LEFT 15 / STRAIGHT / RIGHT 15 / RIGHT 30 | look at the diorama from an angle, to see behind houses; key 7 cycles it |
 | 3D WEATHER | on / off | rain, snow and volcanic ash fall through the 3D scene, behind and in front of buildings, instead of being painted over the map; rain darkens the light, thunderstorms flash |
 | DAY/NIGHT | GAME CLOCK / DEVICE CLOCK / OFF | outdoors, the light follows the time of day: morning and evening sun from the side with long shadows, warm sunsets, blue nights with no shadows. GAME CLOCK uses the clock you set in Ruby/Sapphire/Emerald (FireRed/LeafGreen have none and use the device clock) |
