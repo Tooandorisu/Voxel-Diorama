@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.30.0
+
+- Neighbours built ahead.  While you are on a map, the maps next to it are
+  built too, in the background -- the nearest first, one at a time -- so
+  walking across into one finds it ready: no rebuild, no pause, nothing
+  changing shape at the seam.
+  - Only while the frame has time to spare: paused the moment frames slow
+    down (an average over 20 ms, or any frame over 33 ms in the last
+    second), while the view itself is being rebuilt, and for the first
+    few seconds on a new map.  Off on the lowest quality.
+  - Walking into a neighbour that is still being built carries that build
+    on where it was.
+  - The current map always comes first: a neighbour's build gives way to
+    it after a warp, Fly or Teleport, and is taken up again later.
+  - Up to five maps are kept (three on the lowest quality): the current
+    one and the maps around it go last.
+  - FireRed/LeafGreen once the neighbour's tileset is loaded;
+    Ruby/Sapphire/Emerald once most of its tiles have been seen.
+  - New option BUILD NEIGHBOURS (on by default; BUILD AHEAD works without
+    it, as in 1.29).
+- Smoother background building, for whole maps and neighbours alike: every
+  long pass over a whole map now gives the frame back -- judging a forest's
+  or a mountain's hundred-cell runs, the light bake, the shores.  On a
+  phone, the longest single slice of a build went from 40-110 ms to under
+  8 ms.  What is built is exactly the same.
+- Saving the learned tile art no longer re-encodes every tile ever seen (a
+  60-110 ms hitch on a phone every save): only the new ones.
+- Fixed: "VOXEL VIEW error (render: scene.lua:366: Cannot use object after
+  it has been released)" and a few seconds of black screen, on a map built
+  whole when the sun moved on (every half hour of the day) or a setting
+  changed.
+- Fixed: once a whole map had been shown, the view's own meshes were never
+  drawn again until the next whole map -- rooms half black, or parts
+  popping in and out, right after a door (also in 1.29).
+- PERF STATS, a new line: "near: kept 4 maps (900k verts), built 3,
+  building EM_ROUTE102 420 ms (paused: frame 24 ms)  last: EM_OLDALE_TOWN
+  860 ms over 310 frames, worst 2.4 ms (mesh)  hitches 0/30s  frame 8.3 ms"
+  -- maps kept, neighbours built, the one building (or why the next is
+  not), the last one's cost and its longest slice (and in which part of
+  the build), and frames over 33 ms in the last 30 seconds.
+
 ## 1.29.1
 
 - Fences that run alongside a building or a row of trees are fences again,

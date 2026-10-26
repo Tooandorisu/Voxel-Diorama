@@ -61,6 +61,15 @@ function Cells.provider()
     Cells.mapTypes[tostring(Map.current)] = cmt
     Cells.typesDirty = true
   end
+  return Cells.providerFor(Map.current, def, Map.world or {})
+end
+
+-- A provider for any loaded map, in that map's own coordinates: mapId and
+-- def the map, world the maps around it as { id, def, ox, oy } placed
+-- relative to it (bridge.lua builds a neighbour ahead of time this way --
+-- the very cells it will be built from once it is the current map).
+function Cells.providerFor(mapId, def, world)
+  local Map = Engine.get("src.core.game3.map")
   local layout = def and def.midLayout
   if not (layout and layout.midAt and layout.width) then return nil end
   local frlg = familyName() == "frlg"
@@ -90,13 +99,13 @@ function Cells.provider()
     local ok, v = pcall(MBm.require, "WATERFALL")
     if ok and type(v) == "number" then WATERFALL = v end
   end
-  local world = Map.world or {}
+  world = world or {}
   local indoorDef = def and (def.kind == "indoor" or tonumber(def.mapType) == 8 or tonumber(def.mapType) == 9)
 
   local function locate(cx, cy)
     local w, h = layout.trueWidth or layout.width, layout.trueHeight or layout.height
     if cx >= 0 and cy >= 0 and cx < w and cy < h then
-      return layout, cx, cy, def, Map.current
+      return layout, cx, cy, def, mapId
     end
     for _, entry in ipairs(world) do
       local d = entry.def
@@ -147,10 +156,10 @@ function Cells.provider()
     -- else not a town -- the engine's own "kind" calls routes towns too)
     local dd = d or def
     local mt = dd and tonumber(dd.mapType)
-    if not mt then mt = Cells.mapTypes[tostring(did or (d == nil and Map.current) or "?")] end
+    if not mt then mt = Cells.mapTypes[tostring(did or (d == nil and mapId) or "?")] end
     local town = mt ~= nil and (mt == 1 or mt == 2)
     local info = { kind = kind, mid = mid, coll = coll, border = border, town = town,
-      map = tostring(did or Map.current),
+      map = tostring(did or mapId),
       pair = (L and L.pair) or (d and (d.pair or (d.midLayout and d.midLayout.pair))) }
     -- the map's elevation (caves: 3 the floor, 4 and up the raised levels;
     -- 0 and 15 are stairs and bridges that belong to either)
@@ -194,7 +203,7 @@ function Cells.provider()
   return {
     def = def,
     layout = layout,
-    mapId = Map.current,
+    mapId = mapId,
     revision = layout._revision or 0,
     kind = def.kind,
     cell = cell,

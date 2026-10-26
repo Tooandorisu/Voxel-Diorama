@@ -212,6 +212,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     if nearMids then return nearMids end
     nearMids = {}
     for yy = RY0, RY1 do
+      tick() -- (all of a whole map and its margin: tens of ms on a phone)
       for xx = RX0, RX1 do
         local n = at(xx, yy)
         if n and not n.border and n.mid ~= nil
@@ -313,6 +314,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     local key = (cy - y0 + 64) * 65536 + (cx - x0 + 64)
     local r = structMemo[key]
     if r ~= nil then return r end
+    tick()
     local c = at(cx, cy)
     r = false
     if c then
@@ -356,6 +358,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   end
   foliageCell0 = function(cx, cy)
     if not color then return nil end
+    -- (every judgement that reads art gives the frame back: a whole map's
+    -- hundred-cell runs ask for them by the thousand in one go -- 30-80 ms
+    -- on a phone between two of the loops' own ticks)
+    tick()
     local c0 = at(cx, cy)
     local mkey = c0 and c0.mid ~= nil and (tostring(c0.pair or c0.map) .. ":" .. tostring(c0.mid)) or nil
     local hits, seen = 0, 0
@@ -402,6 +408,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     return v
   end
   rockKnown0 = function(cx, cy)
+    tick()
     local c = at(cx, cy)
     if c and c.cliff then return true end
     local key = c and c.mid ~= nil and (tostring(c.pair) .. ":" .. tostring(c.mid)) or nil
@@ -445,10 +452,12 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- 1. ground everywhere
   for i = 1, vcols * vrows do
     H[i], S[i], K[i], C[i], L[i] = 0, 0, 1, 0, 1
+    if i % 8192 == 0 then tick() end
   end
   for cy = y0, y0 + rows - 1 do
     tick()
     for cx = x0, x0 + cols - 1 do
+      tick()
       local kind = kindOf(cx, cy) or "ground"
       if kind == "water" or kind == "grass" then
         for j = 0, PER - 1 do
@@ -512,6 +521,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     for cy = y0, y0 + rows - 1 do
       tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         local f = floorOf(cx, cy)
         if f and f > 0 then
           for j = 0, PER - 1 do
@@ -568,6 +578,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     local sr0, sr1 = max(ytop * PER, ry0 - 2 * NEAR), min((ybottom + 1) * PER - 1, ry1 + 2 * NEAR)
     local lum, n = {}, 0
     for ry = sr0, sr1 do
+      -- (a whole map's run is a hundred cells long: read in one go, a
+      -- forest column was 30-80 ms on a phone)
+      if ry % 16 == 0 then tick() end
       local wy = ry * VOXEL + 2
       local k, c = kc(wy)
       local v = k * wy + c
@@ -593,6 +606,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- west/north of the current one have negative coordinates)
     local cand = {}
     for ry = max(sr0 + 1, ry0 - 5), min(sr1 - 1, ry1 + 5) do
+      if ry % 16 == 0 then tick() end
       local l, a, b = lum[ry], lum[ry - 1], lum[ry + 1]
       if l and a and b and l <= a and l <= b and l < near(ry) - 0.04 then cand[ry] = l end
     end
@@ -684,6 +698,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     local openN = fill and not leafyAt(cx, ytop - 1)
     local openS = fill and not leafyAt(cx, ybottom + 1)
     for cy = max(ytop, y0), min(ybottom, y0 + rows - 1) do
+      tick()
       local w = walk and walk[cy] or nil
       local kk, cc = kc(cy * CELL)
       local useGaps = gaps and gapRow(cy)
@@ -915,6 +930,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   local function shapeByArt(cx, top, bottom)
     if not color then return end
     for cy = max(top, y0), min(bottom, y0 + rows - 1) do
+      tick()
       for j = 0, PER - 1 do
         for i = 0, PER - 1 do
           local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
@@ -935,6 +951,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- instead of smearing one column of pixels into long streaks
   local function markRock(cx, top, bottom)
     for cy = max(top, y0), min(bottom, y0 + rows - 1) do
+      tick()
       for j = 0, PER - 1 do
         for i = 0, PER - 1 do
           R[vindex((cx - x0) * PER + i, (cy - y0) * PER + j)] = true
@@ -1021,6 +1038,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     for cx = x0 - 1, x0 + cols do
       tick()
       for cy = y0 - 13, y0 + rows + 12 do
+        tick()
         if crown(cx, cy) then crowns = crowns + 1 end
         if forest(cx, cy) then
           cand = cand + 1
@@ -1056,6 +1074,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     for cx = x0 - 1, x0 + cols do
       tick()
       for cy = y0 - 13, y0 + rows + 12 do
+        tick()
         local c = at(cx, cy)
         if c and not c.tree and not c.canopy and (c.kind == "ground" or c.kind == "grass")
             and solidLeafy(cx, cy + 1) and foliageCell(cx, cy) == true then
@@ -1074,6 +1093,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     tick()
     local cy = y0 - 1 -- the apron row lets a run start above the window
     while cy <= y0 + rows - 1 do
+      tick() -- (a whole map's column of runs is many milliseconds of work)
       if struct(cx, cy) then
         -- runs are only measured a few cells past the window: beyond a
         -- map's edge everything is solid border, and a run's height stops
@@ -1587,6 +1607,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
     local function unrock(cx, rc)
       for cy = max(rc.top, y0), min(rc.bottom, y0 + rows - 1) do
+        tick()
         for j = 0, PER - 1 do
           for i = 0, PER - 1 do
             R[vindex((cx - x0) * PER + i, (cy - y0) * PER + j)] = nil
@@ -1639,7 +1660,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       return st == nil or st.g > st.r * 1.02
     end
     for cy = y0, y0 + rows - 1 do
+      tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         local c = at(cx, cy)
         local k = centre(cx, cy)
         local st = c and not opts.cave and k and (H[k] or 0) <= 1 and not F[k] and cellStats(cx, cy)
@@ -1791,7 +1814,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- and any leafy canopy voxel (F).  scene.lua moves them in the wind.
   if opts.indoor ~= true and opts.cave ~= true then
     for cy = y0, y0 + rows - 1 do
+      tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         local c = at(cx, cy)
         -- (not a small cut-out object -- a fence, a sign, a post on a
         -- lawn can pass for leafy art)
@@ -1832,12 +1857,16 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       return c ~= nil and not c.tree and not c.canopy and struct(x, y)
     end
     for cy = y0, y0 + rows - 1 do
+      tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         if not seen[key(cx, cy)] and part(cx, cy) then
           -- flood one block, noting whether a door is in it or under it
           local stack, cells, door = { { cx, cy } }, {}, false
           seen[key(cx, cy)] = true
           while #stack > 0 do
+            -- (one block can be a whole mountain range: hundreds of cells)
+            tick()
             local q = table.remove(stack)
             cells[#cells + 1] = q
             local x, y = q[1], q[2]
@@ -1854,6 +1883,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           if door then
             grid.buildings = grid.buildings + 1
             for _, q in ipairs(cells) do
+              tick()
               local base = (q[2] - y0) * PER * vcols + (q[1] - x0) * PER + 1
               for j = 0, PER - 1 do
                 for i = 0, PER - 1 do grid.B[base + j * vcols + i] = true end
@@ -1896,7 +1926,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   end
   do
     for cy = y0, y0 + rows - 1 do
+      tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         local c = at(cx, cy)
         if c and c.kind == "solid" and not c.tree and not c.border and inTown(c) then
           local sh = shapeOf and shapeOf(c)
@@ -1980,7 +2012,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- no lit doorway.  (Behaviour unknown: any door cut into a facade.)
   if not opts.indoor and not opts.cave then
     for cy = y0, y0 + rows - 1 do
+      tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         local c = at(cx, cy)
         if c and c.kind == "door" and not c.caveDoor and struct(cx, cy)
             and (c.warpDoor or not c.behKnown) then
@@ -1998,7 +2032,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   grid.voidFlat = 0
   if opts.indoor and not opts.cave and color then
     for cy = y0, y0 + rows - 1 do
+      tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         local c = at(cx, cy)
         if c and c.kind == "solid" and not c.tree then
           local st = cellStats(cx, cy)
@@ -2056,7 +2092,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- back wall: per column, the first solid band under the void
     local band = {}
     for cx = x0, X1 do
+      tick()
       for cy = y0, Y1r do
+        tick()
         if solidThing(cx, cy) and isVoid(cx, cy - 1) then
           local e = cy
           while e + 1 <= Y1r and solidThing(cx, e + 1) do e = e + 1 end
@@ -2087,6 +2125,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         end
       end
       for cx = x0, X1 do
+        tick()
         local b = band[cx]
         if b and not ends[cx] then
           -- nearest wide stretch, else the shallowest band near it
@@ -2146,7 +2185,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       for cy = b.top, ends[cx] do role[key(cx, cy)] = "wall" end
     end
     for cy = y0, Y1r do
+      tick()
       for cx = x0, X1 do
+        tick()
         if solidThing(cx, cy) and not role[key(cx, cy)] then
           role[key(cx, cy)] = (isVoid(cx - 1, cy) or isVoid(cx + 1, cy)) and "side" or "thing"
         end
@@ -2158,6 +2199,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- (a side wall runs along the room: one or two cells beside the void
     -- are a cupboard or a plant in the corner)
     for cx = x0, X1 do
+      tick()
       local cy = y0
       while cy <= Y1r do
         if role[key(cx, cy)] == "side" then
@@ -2179,6 +2221,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       local cc = (Y1 - show) - kk * Y1
       local cap = h - show
       for cy = max(cy0, y0), min(cy1, Y1r) do
+        tick()
         for j = 0, PER - 1 do
           for i = 0, PER - 1 do
             local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
@@ -2240,6 +2283,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
     local walls, sides, things = 0, 0, 0
     for cx = x0, X1 do
+      tick()
       local cy = y0
       while cy <= Y1r do
         local r = role[key(cx, cy)]
@@ -2304,7 +2348,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
     -- the floor lies flat (a staircase with it)
     for cy = y0, Y1r do
+      tick()
       for cx = x0, X1 do
+        tick()
         local c = at(cx, cy)
         if c and (c.kind == "ground" or c.kind == "door" or c.warpTile) and not role[key(cx, cy)] then
           for j = 0, PER - 1 do
@@ -2329,6 +2375,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     local made = 0
     local plainL, plainR, wallTop = nil, nil, nil
     for cx = x0, X1 do
+      tick()
       local b = band[cx]
       if b and ends[cx] then
         wallTop = wallTop or ends[cx]
@@ -2375,7 +2422,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   grid.exitNote = nil
   if opts.indoor and color then
     for cy = y0 + 1, y0 + rows - 1 do
+      tick()
       for cx = x0, x0 + cols - 1 do
+        tick()
         local c = at(cx, cy)
         local up = at(cx, cy - 1)
         local down = at(cx, cy + 1)
@@ -2442,7 +2491,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
     local seen = {}
     for cx = x0 - 1, x0 + cols do
+      tick()
       for cy = y0 - 12, y0 + rows + 12 do
+        tick()
         if not seen[cy * 65536 + cx] and isFall(cx, cy) and not isFall(cx, cy - 1) then
           local bottom = cy
           while isFall(cx, bottom + 1) and bottom - cy < 30 do bottom = bottom + 1 end
@@ -2494,9 +2545,11 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     local SH, q, qh = {}, {}, 1
     local WATER = HF.WATER
     for k = 1, vcols * vrows do
+      tick()
       if H[k] ~= WATER then SH[k] = 0; q[#q + 1] = k end
     end
     while qh <= #q do
+      if qh % 4096 == 0 then tick() end
       local k = q[qh]; qh = qh + 1
       local d = SH[k] + 0.25
       if d <= 1 then
