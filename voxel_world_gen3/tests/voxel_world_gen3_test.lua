@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.28.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.29.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -261,6 +261,26 @@ do
     return { width = 10, height = 10, collAt = function(_, x, y) return (y < 2 and x < 4) and code or 0 end }
   end
   T.check(not Bridge.isOutdoor({ mapType = 8, midLayout = pool(0x29) }), "an indoor map with a pool is still indoors")
+  -- tile art learned from the screen (Ruby/Sapphire/Emerald): a tile wholly
+  -- on screen is learned block by block; one cut by the screen's edge is not
+  do
+    local art = Bridge.learnedArt()
+    for k in pairs(art) do art[k] = nil end
+    local function shot(wx, wy)
+      if wx < 0 or wy < 0 or wx >= 40 or wy >= 32 then return nil end
+      return (wx % 16) / 16, (wy % 16) / 16, 0.5
+    end
+    local function cellOf(cx, cy) return { kind = "ground", mid = cx + cy * 10, pair = "P" } end
+    local n = Bridge._learnFrom(shot, cellOf, 0, 0, 40, 32)
+    T.eq(n, 4, "four whole tiles on screen are learned (a 40x32 view: 2x2 whole cells)")
+    local t = art["P:0"]
+    T.check(t and math.abs(t[1] - 2 / 16) < 1e-6 and math.abs(t[46] - 14 / 16) < 1e-6,
+      "a learned tile keeps its sixteen blocks, read at their centres")
+    T.check(art["P:2"] == nil, "a tile cut by the screen's edge is not learned")
+    T.eq(Bridge._learnFrom(shot, function(cx, cy) return { kind = "solid", mid = 500 + cx, pair = "P", border = true } end, 0, 0, 40, 32), 0,
+      "the border tiling is never learned")
+    T.check(art["P:1"] ~= nil and art["P:11"] ~= nil, "every whole tile is there")
+  end
   T.check(Bridge.isOutdoor({ mapType = 8, midLayout = layout(0x29) }), "an 'indoor' map that is mostly open sea (the harbour) has a sky")
   T.check(not Bridge.isOutdoor({ mapType = 4, midLayout = layout(0x29) }), "a cave with a big lake stays dark")
 end

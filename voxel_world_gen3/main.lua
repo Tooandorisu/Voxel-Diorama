@@ -202,7 +202,7 @@ return function(mod)
     return next(game, ev)
   end)
 
-  mod.exports.version = "1.28.0"
+  mod.exports.version = "1.29.0"
   mod.exports.level = function() return Bridge.level() end
   -- read-only timings for tools/tests: { capture, render, mesh, avg } in ms
   mod.exports.stats = function()
