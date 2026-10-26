@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.29.1
+
+- Fences that run alongside a building or a row of trees are fences again,
+  knee-high and cut out of the lawn: told by their tiles' outline (thin
+  rails or posts drawn over the grass), not by what stands beside them.
+  Route 7's fence by the Saffron gate stood up as a long raised slab of
+  lawn.
+- Stepping out of a building, the town's sides no longer stand black for
+  half a second while the camera eases out of the room's zoom: the first
+  mesh is built for the view the camera opens up to.
+
 ## 1.29.0
 
 - Build ahead in Ruby, Sapphire and Emerald too.  Their tilesets' own art
