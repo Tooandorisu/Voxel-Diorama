@@ -16,11 +16,23 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.30.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.31.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
   T.check(type(schema) == "table" and #schema >= 4, "defines its option rows")
+  -- PRE-BUILD AT START: an option, off unless chosen
+  local preRow
+  for _, row in ipairs(schema or {}) do if row.key == "prebuild" then preRow = row end end
+  T.check(preRow ~= nil and preRow.type == "toggle" and preRow.default == false, "PRE-BUILD AT START is a toggle, off by default")
+  -- with no pre-build up, the per-step hook never touches the player's input
+  do
+    local resets = 0
+    local inp = { pressQueue = { "b", "up" }, reset = function() resets = resets + 1 end }
+    local stepped = false
+    Runtime.call("input.step", function() stepped = true end, { input = inp }, 1 / 60)
+    T.check(stepped and resets == 0 and #inp.pressQueue == 2, "input passes untouched when no pre-build is up")
+  end
 
   -- the hotkey is consumed in free roam and passed through otherwise
   local passed = false
@@ -1107,6 +1119,11 @@ do
   local n = #FP._state.prints
   T.check(n >= 4 and n <= 5, "an NPC on sand leaves a print every 8 px (" .. n .. ")")
   for _, p in ipairs(FP._state.prints) do T.check(p.x < 60, "none from the player") end
+  -- FireRed/LeafGreen: the game draws none of its own, so the player too
+  FP.reset()
+  local pl2 = { x = 100, y = 0 }
+  for _ = 1, 40 do pl2.x = pl2.x + 1; FP.update(1 / 60, "M", { pl2 }, ground("sand"), 1, false, true) end
+  T.check(#FP._state.prints >= 4, "with playerSand the player leaves sand prints (" .. #FP._state.prints .. ")")
   FP.update(1 / 60, "OTHER", {}, ground("sand"), nil, false)
   T.eq(#FP._state.prints, 0, "a new map starts clean")
   local a = { x = 0, y = 0 }

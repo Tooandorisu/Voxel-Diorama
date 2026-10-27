@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.31.0
+
+- New option PRE-BUILD AT START (off by default).  On arriving somewhere
+  new -- Continue / New Game, a Fly, a Teleport, a warp to another map out
+  of doors -- the map is built whole right away behind a "Building 3D
+  world... 1/3" screen; at the start of a session its neighbours too.  B
+  skips it: the building carries on in the background as always.
+  - Only when needed: never indoors, never across a seam, never for a map
+    still kept in memory (straight in), never when a map is not built
+    whole anyway (too big, or too few of its tiles seen yet).
+  - The game is not frozen: it runs on underneath at ~25 fps while the
+    player's input is held, so slower phones never stall.  A battle, the
+    view switched off or no progress for 30 seconds ends it.
+  - Memory: at most the five maps kept anyway (three on the lowest
+    quality, which pre-builds the current map only).
+  - About 1.3 s for a Fly to a new town on an S25+.
+- Fixed: the field-move cut-in (the band with your Pokemon across the
+  screen when you use Fly, Surf, Cut...) was painted onto the map, a black
+  strip with sparks over the roofs north of the player.  It is drawn flat
+  over the 3D view now, where the game shows it.
+- Fixed (FireRed/LeafGreen): the player left no footprints in sand while
+  NPCs did.  Ruby/Sapphire/Emerald draw the player's own; FireRed/LeafGreen
+  draw none, so the mod lays them there (and stands back should the game
+  ever draw its own).
+- PERF STATS: "pre:" on the near line -- the pre-build under way (maps done
+  of all, seconds) or the last one, how it ended and which maps it left out
+  and why ("skipped EM_ROUTE119: too big").  "(seam: waiting for the
+  picture)" says which check holds it and for how long.
+
 ## 1.30.0
 
 - Neighbours built ahead.  While you are on a map, the maps next to it are
