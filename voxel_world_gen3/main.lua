@@ -84,6 +84,7 @@ return function(mod)
     { key = "falls", label = "WATERFALLS", type = "toggle", default = true },
     { key = "wholeMaps", label = "BUILD AHEAD", type = "toggle", default = true },
     { key = "nearMaps", label = "BUILD NEIGHBOURS", type = "toggle", default = true },
+    { key = "prebuild", label = "PRE-BUILD AT START", type = "toggle", default = false },
     { key = "shadows", label = "SHADOWS", type = "toggle", default = true },
     { key = "xray", label = "SEE-THROUGH", type = "toggle", default = true },
     { key = "rate", label = "3D RATE", type = "choice", default = "auto",
@@ -129,6 +130,7 @@ return function(mod)
       falls = mod.options:get("falls") ~= false,
       wholeMaps = mod.options:get("wholeMaps") ~= false,
       nearMaps = mod.options:get("nearMaps") ~= false,
+      prebuild = mod.options:get("prebuild") == true,
       blur = mod.options:get("blur") ~= false,
       roundTrees = mod.options:get("roundTrees") ~= false,
       roofs = mod.options:get("roofs") ~= false,
@@ -173,8 +175,24 @@ return function(mod)
       installed = install()
     end
     sync()
+    -- PRE-BUILD AT START: while its screen is up the player's input is held
+    -- (cleared before the game reads it, every step); a fresh press of B
+    -- skips it.  (Only a fresh press: B held to run through a door must not.)
+    if installed and Bridge.preActive() then
+      local inp = game and game.input
+      if inp then
+        for _, btn in ipairs(inp.pressQueue or {}) do
+          if btn == "b" then Bridge.preSkip() break end
+        end
+        if inp.reset then pcall(inp.reset, inp) end
+      end
+    end
     return next(game, dt)
   end)
+
+  -- a new session: the next pre-build takes the neighbours along too
+  mod.events:on("save.loaded", function() Bridge.newSession() end)
+  mod.events:on("save.created", function() Bridge.newSession() end)
 
   mod.hooks:wrap("input.key", function(next, game, ev)
     if ev and ev.phase == "pressed" and ev.key == TURN_KEY and Bridge.level() > 0 then
@@ -204,7 +222,7 @@ return function(mod)
     return next(game, ev)
   end)
 
-  mod.exports.version = "1.30.0"
+  mod.exports.version = "1.31.0"
   mod.exports.level = function() return Bridge.level() end
   -- read-only timings for tools/tests: { capture, render, mesh, avg } in ms
   mod.exports.stats = function()
@@ -213,7 +231,9 @@ return function(mod)
              avg = st.avgMs, building = st.job ~= nil,
              groundW = st.bigW, groundH = st.bigH, renderW = st.rw, renderH = st.rh,
              verts = st.meshVerts, tris = st.meshTris,
-             quality = Bridge.preset().name, half = st.halfNow == true }
+             quality = Bridge.preset().name, half = st.halfNow == true,
+             pre = st.pre and { kind = st.pre.kind, done = st.pre.done, total = st.pre.total } or nil,
+             preLast = st.preLast }
   end
   mod.exports.setLevel = function(level)
     liveLevel = Bridge.setLevel(level)

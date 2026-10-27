@@ -912,9 +912,17 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
     fwDraw, fwBelow = FW.draw, FW.drawBelow
     FW.draw, FW.drawBelow = function() end, function() end
   end
+  -- nor the field-move cut-in (Fly, Surf, Cut...: the band with the
+  -- Pokemon across the screen): it is a screen overlay, and painted into the
+  -- map it lay over the roofs north of the player as a black strip -- drawn
+  -- flat over the 3D view instead (step 3)
+  local ShowMon = Engine.get("src.core.game3.field_move_show_mon")
+  local smDraw = ShowMon and ShowMon.draw
+  if smDraw then ShowMon.draw = function() end end
   local okG, camX, camY = pcall(withCameraCapture, function()
     orig(game, W, H, { skipActors = true })
   end)
+  if smDraw then ShowMon.draw = smDraw end -- (back before any error below)
   if flashFn then FV.flashRadius = flashFn end
   if FW then FW.draw, FW.drawBelow = fwDraw, fwBelow end
   state.dark = dark and dark > 0 and dark or nil
@@ -992,7 +1000,9 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
     end
   end
   if FV and pan ~= 0 then FV.cameraPanY = basePan + pan end
+  if smDraw then ShowMon.draw = function() end end
   local okA, errA = pcall(orig, game, W, H, { actorsOnly = true, billboard = true })
+  if smDraw then ShowMon.draw = smDraw end
   if FV and pan ~= 0 then FV.cameraPanY = basePan end
   if fxCollect then FXm.collectActors = fxCollect end
   if Tilt then Tilt.groundPoint = groundPoint end
@@ -1003,6 +1013,10 @@ function Bridge.captureFrame(orig, game, canvasW, canvasH, opts)
   -- 3. leave the engine's world canvas empty for the OAM layer
   love.graphics.setCanvas(worldCanvas)
   love.graphics.clear(0, 0, 0, 0)
+  -- (the field-move cut-in is drawn over the finished 3D picture, flat,
+  -- where the game puts it on the screen: not in this canvas, which is
+  -- laid on the ground under the player)
+  state.showMonDraw = (smDraw and ShowMon.isActive and ShowMon.isActive()) and smDraw or nil
 
   state.pending = {
     game = game, camX = camX, camY = camY, W = W, H = H,
@@ -1485,7 +1499,6 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   local q = preset()
   local MapW = Engine.get("src.core.game3.map")
   state.phase = 'hf'
-  if WHOLE_DEBUG then HF._mark = function(n) state.phase = 'hf' .. n end end
   local grid = HF.build({ cell = Bridge.cachedCells(provider, MapW and MapW.world), color = color, shape = provider.shape },
     x0, y0, x1 - x0 + 1, y1 - y0 + 1,
     { heightScale = settings.heightScale, lumps = settings.lumps, tick = tick,
@@ -1642,10 +1655,12 @@ end
 -- The neighbour of the current map nearest the player that is not built yet
 -- (and can be): built whole, in its own coordinates, with the maps around it
 -- placed relative to it the way they will be once it is the current map.
-function Bridge.startNeighbour(provider, p, world, view, fcx, fcy)
+-- target: build this one (an entry of world) instead of the nearest -- the
+-- pre-build's list.  Returns "started", "built" (already kept) or nil, why.
+function Bridge.startNeighbour(provider, p, world, view, fcx, fcy, target)
   state.nearTried = state.nearTried or {}
-  local best, bestD
-  for _, en in ipairs(world or {}) do
+  local best, bestD = target, target and 0 or nil
+  for _, en in ipairs(target and {} or world or {}) do
     local d = en.def
     local L = d and d.midLayout
     local w, h = L and (L.trueWidth or L.width), L and (L.trueHeight or L.height)
@@ -1660,7 +1675,7 @@ function Bridge.startNeighbour(provider, p, world, view, fcx, fcy)
       end
     end
   end
-  if not best then state.nearNote = nil return end
+  if not best then state.nearNote = nil return nil, "none near" end
   -- its world: the current map and the others, placed relative to it
   local nb = state.nbWorlds and state.nbWorlds[tostring(best.id)]
   if not (nb and nb.src == world) then
@@ -1675,10 +1690,10 @@ function Bridge.startNeighbour(provider, p, world, view, fcx, fcy)
   end
   local np = Cells.providerFor and Cells.providerFor(best.id, best.def, nb.list)
   state.nearTried[tostring(best.id)] = now()
-  if not np then return end
+  if not np then return nil, "no data" end
   local key = wholeKey(np)
   local have = state.wholeCache[best.id]
-  if have and have.key == key then return end
+  if have and have.key == key then return "built" end
   -- (in its own coordinates: the view's reach the same, the player not on it)
   local vw = { view[1] - (best.ox or 0), view[2] - (best.oy or 0), view[3] - (best.ox or 0), view[4] - (best.oy or 0) }
   local ok, why = wholeEligible(np, vw, fcx - (best.ox or 0), fcy - (best.oy or 0))
@@ -1692,7 +1707,7 @@ function Bridge.startNeighbour(provider, p, world, view, fcx, fcy)
   if not ok then
     state.nearNote = ("%s: %s"):format(tostring(best.id), tostring(why))
     if WHOLE_DEBUG then print("near: not", best.id, why) end
-    return
+    return nil, why
   end
   local wx0, wy0, wx1, wy1 = wholeBounds(np, vw, fcx - (best.ox or 0), fcy - (best.oy or 0))
   local cov = nil
@@ -1702,6 +1717,146 @@ function Bridge.startNeighbour(provider, p, world, view, fcx, fcy)
   startJobIn("wjob", np, p, wx0, wy0, wx1, wy1, { key = key, cov = cov, ready = worldReady(nb.list), neighbour = true })
   if WHOLE_DEBUG then print("near: start", best.id, wx0, wy0, wx1, wy1, cov) end
   state.nearNote = nil
+  return "started"
+end
+
+-- ------- pre-build (PRE-BUILD AT START, default off)
+-- On arriving somewhere new by a warp, Fly or Teleport -- or at the start
+-- of a session -- the map is built whole straight away, behind a "Building
+-- 3D world" screen, the frame given to it instead of a few milliseconds of
+-- it; at the start of a session (Continue / New Game: the first map out of
+-- doors) its neighbours too.  The game goes on underneath, but the player's
+-- input is held (main.lua) until it is done or B skips it -- then BUILD
+-- AHEAD / BUILD NEIGHBOURS carry on in the background as always.
+-- Never indoors (a room is built in a moment anyway), never across a seam,
+-- never for a map already kept.
+local PRE_BUDGET = 0.030   -- seconds a frame: ~25 fps on the screen, never a freeze
+local PRE_STALL = 30       -- seconds without a map done: give up
+state.preStart = true      -- the next pre-build is a session's first: neighbours too
+
+function Bridge.newSession()
+  state.preStart = true
+end
+
+local function endPre(why)
+  local pre = state.pre
+  if not pre then return end
+  state.pre = nil
+  state.preLast = ("%s %d/%d in %.1f s, %s"):format(pre.kind, pre.done, pre.total, now() - pre.t0, why)
+    .. (pre.note and (" (" .. pre.note .. ")") or "")
+    .. ((pre.skipped and #pre.skipped > 0) and (" (skipped " .. table.concat(pre.skipped, ", ") .. ")") or "")
+  -- (the long frames behind the screen are not a frame rate: AUTO and the
+  -- neighbours' gate start afresh)
+  state.settleUntil = now() + 1.5
+  state.frameAvg, state.slowT = nil, nil
+  if WHOLE_DEBUG then print("pre: end", state.preLast) end
+end
+
+-- the maps right next to this one (not those two hops away), not kept yet
+local function preNeighbours(provider, world, room)
+  local w, h = mapSize(provider.def)
+  local list = {}
+  if not (w and h) or room <= 0 then return list end
+  for _, en in ipairs(world or {}) do
+    local d = en.def
+    local L = d and d.midLayout
+    local ew, eh = L and (L.trueWidth or L.width), L and (L.trueHeight or L.height)
+    if ew and eh and L.midAt and tostring(en.id) ~= tostring(provider.mapId) and isOutdoor(d) then
+      local ox, oy = en.ox or 0, en.oy or 0
+      local gx = math.max(0, ox - w, -ox - ew)
+      local gy = math.max(0, oy - h, -oy - eh)
+      if gx == 0 and gy == 0 and not state.wholeCache[en.id] then list[#list + 1] = en end
+    end
+  end
+  -- (memory: never more than the maps kept anyway)
+  while #list > room do table.remove(list) end
+  return list
+end
+
+local function startPre(provider, world)
+  local qn = preset().name
+  local low = qn == "POTATO" or qn == "AUTO-3"
+  local keep = low and 3 or WHOLE_KEEP
+  local first = state.preStart
+  state.preStart = false
+  local list = (first and not low) and preNeighbours(provider, world, keep - 1) or {}
+  state.pre = { t0 = now(), seenT = now(), progressT = now(), mapId = provider.mapId,
+    kind = first and "start" or "warp", list = list, done = 0, total = 1 + #list, phase = "current" }
+  state.wholeWhy = nil
+  state.preRuns = (state.preRuns or 0) + 1
+  if WHOLE_DEBUG then print("pre: start", provider.mapId, state.pre.kind, state.pre.total) end
+end
+
+-- true while the screen is up (main.lua holds the input meanwhile).  Up
+-- only once a build is really under way: deciding that there is nothing to
+-- build (too big a map, too few of its tiles seen) shows nothing at all.
+function Bridge.preActive()
+  local pre = state.pre
+  if not pre then return false end
+  -- (the view switched off, or not drawn for a second: nothing would ever
+  -- finish -- never hold the player there)
+  if settings.level == 0 or state.disabled or now() - (pre.seenT or pre.t0) > 1 then
+    endPre("view stopped")
+    return false
+  end
+  return pre.shown == true
+end
+
+function Bridge.preSkip()
+  if state.pre then endPre("skipped") end
+end
+
+function Bridge.preStatus()
+  local pre = state.pre
+  if not pre then return nil end
+  return math.min(pre.total, pre.done + 1), pre.total, pre.done
+end
+
+-- once a frame while a pre-build is on (not on a warp's own frame)
+local function stepPre(provider, p, world, view, fcx, fcy, wkey)
+  local pre = state.pre
+  pre.seenT = now()
+  if tostring(provider.mapId) ~= tostring(pre.mapId) then endPre("map changed") return end
+  if settings.prebuild ~= true or settings.wholeMaps == false then endPre("off") return end
+  if now() - pre.progressT > PRE_STALL then endPre("stalled") return end
+  state.settleUntil = now() + 1.5 -- (AUTO: these frames are long on purpose)
+  if pre.phase == "current" then
+    local e = state.wholeCache[provider.mapId]
+    if e and e.key == wkey then
+      pre.done, pre.phase, pre.progressT = pre.done + 1, "near", now()
+    elseif not state.wjob and (state.wholeAsked or 0) >= pre.t0 and state.wholeWhy
+        and now() - pre.t0 > 1.5 then
+      -- (this map is not built whole -- too big, or not enough of its
+      -- tiles seen yet (a moment's grace: the first view mesh learns the
+      -- screen's): the view's own meshes, as always)
+      pre.total, pre.phase = pre.total - 1, "near"
+      pre.note = "this map: " .. tostring(state.wholeWhy)
+    elseif state.wjob and not state.wjob.neighbour and tostring(state.wjob.mapId) == tostring(pre.mapId) then
+      pre.shown = true
+    end
+    if pre.phase ~= "near" then return end
+  end
+  if state.wjob then return end -- (the one under way: stepped below)
+  if pre.building then
+    local e = state.wholeCache[pre.building]
+    if e then pre.done = pre.done + 1 else
+      pre.total = pre.total - 1
+      pre.skipped = pre.skipped or {}
+      pre.skipped[#pre.skipped + 1] = tostring(pre.building) .. ": build did not finish"
+    end
+    pre.building, pre.progressT = nil, now()
+  end
+  while #pre.list > 0 do
+    local en = table.remove(pre.list, 1)
+    local st, why = Bridge.startNeighbour(provider, p, world, view, fcx, fcy, en)
+    if st == "started" then pre.building, pre.shown = en.id, true return end
+    if st == "built" then pre.done = pre.done + 1 else
+      pre.total = pre.total - 1
+      pre.skipped = pre.skipped or {}
+      pre.skipped[#pre.skipped + 1] = tostring(en.id) .. ": " .. tostring(why)
+    end
+  end
+  endPre("done")
 end
 
 function Bridge.renderPending(R)
@@ -1765,6 +1920,19 @@ function Bridge.renderPending(R)
     if now() - (state.misalignedT or -10) < 0.3 then settled = false end
   end
   state.settledNow = settled
+  -- (PERF STATS: which of the checks is holding it, and for how long)
+  if not settled then
+    local why = defLate and "map data late"
+      or (now() - (state.mapSwitchT or 0) <= 0.25 and "map just switched")
+      or (now() - (state.camJumpT or 0) < 0.3 and ("camera jump %d,%d"):format(
+        math.floor((state.camDelta or { 0, 0 })[1]), math.floor((state.camDelta or { 0, 0 })[2])))
+      or (now() - (state.misalignedT or -10) < 0.3 and ("picture misaligned " .. tostring(state.alignNote)))
+      or "?"
+    state.unsettledWhy = why
+    state.unsettledSince = state.unsettledSince or now()
+  else
+    state.unsettledWhy, state.unsettledSince = nil, nil
+  end
 
   local fx, fy = state.focusX, state.focusY
   -- feet height under the focus, smoothed so surfing does not bob the camera
@@ -1853,7 +2021,8 @@ function Bridge.renderPending(R)
   -- been seen (the one in use stays until the new one is ready)
   -- (and any map once more of the maps around it have loaded: its margin
   -- was built as border where they were still on their way)
-  if we and not state.wjob and settled and tnow - (state.wholeAsked or 0) > 2
+  -- (not behind the pre-build's screen: the neighbours first, this later)
+  if we and not state.wjob and settled and not state.pre and tnow - (state.wholeAsked or 0) > 2
       and ((we.cov and we.cov < 0.97) or worldReady(world) > (we.ready or 0)) then
     state.wholeAsked = tnow
     local MapL = Engine.get("src.core.game3.map")
@@ -1938,7 +2107,8 @@ function Bridge.renderPending(R)
   state.gap = state.job ~= nil and needsRebuild(provider, world, cx0, cy0, cx1, cy1)
   if state.job then stepJob() end
   -- frame times, for pausing the neighbours
-  do
+  -- (not behind the pre-build's screen: long frames there on purpose)
+  if not state.pre then
     local dt = love.timer.getDelta and love.timer.getDelta() or 1 / 60
     state.frameAvg = state.frameAvg and (state.frameAvg * 0.95 + dt * 0.05) or dt
     if dt > NEAR_FRAME_MAX then state.slowT = now() end
@@ -1948,8 +2118,15 @@ function Bridge.renderPending(R)
     while state.hitches[1] and now() - state.hitches[1] > 30 do table.remove(state.hitches, 1) end
   end
   local frameOk = (state.frameAvg or 0) < NEAR_FRAME_OK and now() - (state.slowT or -10) > 1
+  if state.pre and not hard then
+    stepPre(provider, p, world, { cx0, cy0, cx1, cy1 }, math.floor(fx / CELL), math.floor(fy / CELL), wkey)
+  end
   if state.wjob and not hard then
-    if not state.wjob.neighbour then
+    if state.pre and state.pre.shown then
+      -- (behind the screen: the frame is the build's)
+      stepJobIn("wjob", PRE_BUDGET)
+      state.nearPaused = nil
+    elseif not state.wjob.neighbour then
       stepJobIn("wjob", WHOLE_BUDGET)
     elseif frameOk and not state.job then
       stepJobIn("wjob", NEAR_BUDGET)
@@ -1959,7 +2136,7 @@ function Bridge.renderPending(R)
     end
   end
   -- the next neighbour to build ahead
-  if not state.wjob and not state.job and not hard and settled and frameOk
+  if not state.wjob and not state.job and not hard and settled and frameOk and not state.pre
       and settings.nearMaps ~= false and settings.wholeMaps ~= false
       and now() - (state.mapSwitchT or 0) > NEAR_SETTLE
       and (state.wholeCache[provider.mapId] or state.wholeWhy) then
@@ -2003,6 +2180,16 @@ function Bridge.renderPending(R)
       rebuild(provider, p, cx0 - m - w, cy0 - m - 8, cx1 + m + w, cy1 + m + 2)
     else
       rebuild(provider, p, cx0 - m, cy0 - m, cx1 + m, cy1 + m)
+    end
+    -- PRE-BUILD AT START: arrived somewhere new (not a changed setting, not
+    -- a seam -- those are not hard -- and not indoors), not kept yet
+    if settings.prebuild == true and settings.wholeMaps ~= false and isOutdoor(provider.def)
+        and (not b or b.mapId ~= provider.mapId) then
+      local e = state.wholeCache[provider.mapId]
+      if not (e and e.key == wkey) then
+        endPre("warped")
+        startPre(provider, world)
+      end
     end
   end
 
@@ -2177,7 +2364,19 @@ function Bridge.renderPending(R)
       walker("wild" .. tostring(wa.id), wa.x, wa.y, nil, false, false, true)
     end
     state.printMv = nmv
-    Footprints.update(dtp, provider.mapId, walkers, groundAt, wp, weatherKind(provider.def) == "ash")
+    -- The player's own prints in sand are the game's (its sand-footprint
+    -- field effect, drawn into the map) -- in Ruby/Sapphire/Emerald.  In
+    -- FireRed/LeafGreen the game drew none (Ayush: NPCs left prints on the
+    -- beach, the player did not), so there the player's are ours too --
+    -- unless the game is seen drawing its own after all.
+    local FEt = Engine.get("src.core.game3.field_effects")
+    if not state.gameTracksSeen and FEt and type(FEt._anims) == "table" then
+      for _, an in ipairs(FEt._anims) do
+        if type(an) == "table" and an.kind == "tracks" then state.gameTracksSeen = true break end
+      end
+    end
+    local playerSand = provider.family == "frlg" and not state.gameTracksSeen
+    Footprints.update(dtp, provider.mapId, walkers, groundAt, wp, weatherKind(provider.def) == "ash", playerSand)
     Scene.setPrints(Footprints.build())
   else
     Scene.setPrints({}, 0, {}, 0)
@@ -2450,6 +2649,26 @@ function Bridge.renderPending(R)
     love.graphics.draw(target, 0, 0, 0, pw / rw, ph / rh)
     love.graphics.pop()
   end
+  -- the field-move cut-in (Fly, Surf, Cut...), flat over it all: the world
+  -- canvas is the screen, scaled to this picture, the GBA screen centred in it
+  if state.showMonDraw then
+    local Disp = Engine.get("src.core.game3.display")
+    local dw, dh = (Disp and Disp.W) or 240, (Disp and Disp.H) or 160
+    local smd = state.showMonDraw
+    state.showMonDraw = nil
+    pcall(function()
+      love.graphics.push("all")
+      love.graphics.setCanvas(final)
+      love.graphics.origin()
+      love.graphics.setShader()
+      love.graphics.setBlendMode("alpha")
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.scale(pw / ow, ph / oh)
+      love.graphics.translate(math.floor((ow - dw) / 2), math.floor((oh - dh) / 2))
+      smd()
+      love.graphics.pop()
+    end)
+  end
   if inline then
     love.graphics.push("all")
     love.graphics.setCanvas(wc)
@@ -2688,7 +2907,10 @@ function Bridge.install()
                 wtxt = "whole map: no" .. (state.wholeWhy and (" (" .. state.wholeWhy .. ")") or "")
               end
             end
-            if state.settledNow == false then wtxt = wtxt .. "  (seam: waiting for the picture)" end
+            if state.settledNow == false then
+              wtxt = wtxt .. ("  (seam: waiting for the picture -- %s, %.1f s)"):format(
+                tostring(state.unsettledWhy), now() - (state.unsettledSince or now()))
+            end
             text = text .. "\n" .. wtxt
             -- neighbours built ahead: kept maps, the one building (or why
             -- not), the last one done, frames over 33 ms in the last 30 s
@@ -2704,6 +2926,14 @@ function Bridge.install()
               ntxt = ntxt .. ", next " .. state.nearNote
             end
             if state.nearLast then ntxt = ntxt .. "  last: " .. state.nearLast end
+            -- PRE-BUILD AT START: the one up (maps done of all, seconds) or the last
+            if state.pre then
+              ntxt = ntxt .. ("  pre: %s %d/%d %.1f s"):format(state.pre.kind, state.pre.done, state.pre.total, now() - state.pre.t0)
+            elseif state.preLast then
+              ntxt = ntxt .. "  pre last: " .. state.preLast
+            elseif settings.prebuild == true then
+              ntxt = ntxt .. "  pre: on"
+            end
             ntxt = ntxt .. ("  hitches %d/30s  frame %.1f ms"):format(#(state.hitches or {}), (state.frameAvg or 0) * 1000)
             text = text .. "\n" .. ntxt
           end
@@ -2775,6 +3005,44 @@ function Bridge.install()
         love.graphics.rectangle("fill", 4, 4, widest * k + 12, font:getHeight() * k * lines + 8)
         love.graphics.setColor(1, 1, 0.4, 1)
         love.graphics.print(text, 10, 8, 0, k, k)
+        love.graphics.pop()
+      end)
+    end
+    -- the pre-build's screen: over everything (the touch buttons show
+    -- through, dimmed -- B skips)
+    if Bridge.preActive() then
+      pcall(function()
+        local k, n = Bridge.preStatus()
+        love.graphics.push("all")
+        love.graphics.setCanvas()
+        love.graphics.origin()
+        love.graphics.setShader()
+        local w, h = love.graphics.getDimensions()
+        local sc = math.max(1, math.floor(math.min(w, h) / 270))
+        local font = love.graphics.getFont()
+        love.graphics.setColor(0.03, 0.04, 0.07, 0.82)
+        love.graphics.rectangle("fill", 0, 0, w, h)
+        local dots = ("."):rep(1 + math.floor(now() * 3) % 3)
+        local line1 = ("Building 3D world%s  %d/%d"):format(dots, k or 1, n or 1)
+        local line1w = ("Building 3D world...  %d/%d"):format(k or 1, n or 1) -- (width without the dots' flicker)
+        local line2 = "B: skip (keeps building in the background)"
+        local cy = math.floor(h * 0.42)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.print(line1, math.floor((w - font:getWidth(line1w) * sc) / 2), cy, 0, sc, sc)
+        -- progress: the maps done, and the one under way filling in
+        local done = state.pre.done
+        local part = 0
+        local job = state.wjob
+        if job and job.work then part = math.min(0.9, job.work / 1.5) end
+        local bw, bh = math.floor(math.min(w * 0.5, 160 * sc)), 3 * sc
+        local bx, by = math.floor((w - bw) / 2), cy + font:getHeight() * sc + 4 * sc
+        love.graphics.setColor(1, 1, 1, 0.25)
+        love.graphics.rectangle("fill", bx, by, bw, bh)
+        love.graphics.setColor(0.55, 0.85, 1, 1)
+        love.graphics.rectangle("fill", bx, by, math.floor(bw * math.min(1, (done + part) / math.max(1, n or 1))), bh)
+        local s2 = math.max(1, sc - 1)
+        love.graphics.setColor(1, 1, 1, 0.7)
+        love.graphics.print(line2, math.floor((w - font:getWidth(line2) * s2) / 2), by + bh + 6 * sc, 0, s2, s2)
         love.graphics.pop()
       end)
     end

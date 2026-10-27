@@ -1,6 +1,7 @@
 -- Footprints.  Characters leave prints where the ground is soft:
 --   sand    -- NPCs, followers and wild Pokemon on the move.  (The player's
---              own prints in sand the game already draws into the map.)
+--              own prints in sand Ruby/Sapphire/Emerald already draw into
+--              the map; in FireRed/LeafGreen the player's are ours too.)
 --   ash     -- on a map under falling volcanic ash (Route 113): everyone,
 --              the player too, on any open ground.
 --   wet     -- anyone just out of a puddle or shallow water leaves a few
@@ -44,8 +45,9 @@ end
 -- actors: { x, y, ground } (world px, feet); ground(x, y) -> "sand" /
 -- "wet" (a wet cell: puddle, shallow water) / "ash" / "open" / nil;
 -- player: the index in actors of the player (nil when unknown); ashMap:
--- volcanic ash is falling here
-function Footprints.update(dt, map, actors, groundAt, player, ashMap)
+-- volcanic ash is falling here; playerSand: the player leaves sand prints
+-- too (the game draws none of its own)
+function Footprints.update(dt, map, actors, groundAt, player, ashMap, playerSand)
   dt = min(dt or 1 / 60, 0.1)
   state.t = state.t + dt
   if map ~= state.map then
@@ -109,7 +111,7 @@ function Footprints.update(dt, map, actors, groundAt, player, ashMap)
           w.lastPrint = state.t
           local kind
           if swim then kind = "wake"
-          elseif g == "sand" and i ~= player then kind = "sand"
+          elseif g == "sand" and (i ~= player or playerSand) then kind = "sand"
           elseif ashMap and (g == "open" or g == "sand") then kind = "ash"
           elseif w.wet and w.wet > 0 and g ~= "wet" and g ~= nil then kind = "wet" end
           if kind then
