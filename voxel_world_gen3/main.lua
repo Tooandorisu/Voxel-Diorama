@@ -66,6 +66,8 @@ return function(mod)
       choices = { { "GAME CLOCK", "game" }, { "DEVICE CLOCK", "device" }, { "OFF", "off" } } },
     { key = "blur", label = "DISTANCE BLUR", type = "toggle", default = true },
     { key = "roundTrees", label = "ROUND TREES", type = "toggle", default = true },
+    { key = "treeStyle", label = "TREE STYLE", type = "choice", default = "rounded",
+      choices = { { "CLASSIC", "classic" }, { "ROUNDED", "rounded" } } },
     { key = "roofs", label = "SLOPED ROOFS", type = "toggle", default = true },
     { key = "solid", label = "SOLID CHARACTERS", type = "choice", default = "3",
       choices = { { "OFF", "0" }, { "THIN", "2" }, { "SLAB", "3" }, { "THICK", "5" } } },
@@ -133,6 +135,7 @@ return function(mod)
       prebuild = mod.options:get("prebuild") == true,
       blur = mod.options:get("blur") ~= false,
       roundTrees = mod.options:get("roundTrees") ~= false,
+      treeStyle = mod.options:get("treeStyle") or "rounded",
       roofs = mod.options:get("roofs") ~= false,
       solid = tonumber(mod.options:get("solid")) or 3,
       indoorZoom = mod.options:get("indoorZoom") or "fit",
@@ -222,7 +225,7 @@ return function(mod)
     return next(game, ev)
   end)
 
-  mod.exports.version = "1.31.0"
+  mod.exports.version = "1.32.0"
   mod.exports.level = function() return Bridge.level() end
   -- read-only timings for tools/tests: { capture, render, mesh, avg } in ms
   mod.exports.stats = function()

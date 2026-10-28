@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.32.0
+
+- Rounded trees.  New option TREE STYLE, ROUNDED by default (CLASSIC is
+  the old look).  Each tree's crown is shaped from its own art: the leaf
+  greens stay up, the teal ground between trees and the dark outline round
+  each crown are the gaps, and the top falls away towards them.  Every
+  crown the art draws becomes its own rounded mound, wherever it sits on
+  the tile grid -- no more forests of long ridges ("walls") with dark
+  grooves down every row.  The pixel art itself is unchanged.
+  - Dark shading inside a big crown (Viridian Forest) counts as leaf, so
+    those forests stay calm.
+  - A jungle with no ground between its trees (Fortree, Route 119) keeps
+    the classic shape.
+  - Objects standing in a hedge (a mailbox, a sign) keep their shape.
+  - Cost: whole maps -2% to +22% vertices; on an S25+ no difference in
+    frame time or build time.
+- Fixed (FireRed/LeafGreen): BUILD AHEAD, BUILD NEIGHBOURS and PRE-BUILD
+  could stop working for a whole session ("whole map: no (tileset art not
+  checked yet)" on every map).  One tileset whose art never matches the
+  screen pulled a shared average under the limit.  Each tileset is judged
+  by itself now.
+- PERF STATS: "trees ROUNDED n" (crown voxels shaped); a failing tileset
+  shows its sample count.
+
 ## 1.31.0
 
 - New option PRE-BUILD AT START (off by default).  On arriving somewhere
