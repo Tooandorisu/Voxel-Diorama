@@ -41,6 +41,7 @@ voxels.
 | WATERFALLS | on / off | waterfalls fall from the cliff tops as sheets of streaming water, with mist, spray and froth where they land |
 | BUILD AHEAD | on / off | builds the whole map in the background (in Ruby/Sapphire/Emerald once most of its tiles have been on screen; maps up to about Saffron's size), then stops rebuilding while you walk: no stutter, nothing changes shape |
 | BUILD NEIGHBOURS | on / off | also builds the maps next to the current one in the background, while frames have time to spare, so crossing into one is seamless |
+| TREE STYLE | rounded / classic | ROUNDED shapes each tree's crown from its own art; CLASSIC is the older look (rows of ridges) |
 | PRE-BUILD AT START | off / on | on arriving somewhere new (Continue, New Game, Fly, Teleport, a warp out of doors), builds the map (and at the start its neighbours) behind a short loading screen; B skips |
 | CAMERA TURN | LEFT 30 / LEFT 15 / STRAIGHT / RIGHT 15 / RIGHT 30 | look at the diorama from an angle, to see behind houses; key 7 cycles it |
 | 3D WEATHER | on / off | rain, snow and volcanic ash fall through the 3D scene, behind and in front of buildings, instead of being painted over the map; rain darkens the light, thunderstorms flash |

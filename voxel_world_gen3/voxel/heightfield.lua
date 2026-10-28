@@ -557,6 +557,11 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   }
   local roundP = ROUND[opts.round or ""]
   local round = roundP ~= nil
+  -- opts.trees == "art": tree crowns shaped by their own art instead of by
+  -- the cell grid (see the crown pass after the runs); the voxels to shape
+  -- are noted here: [voxel] = the run's height
+  local artCrowns = opts.trees == "art" and round and color ~= nil
+  local crownVox = artCrowns and {} or nil
   local ROUND_X = roundP and roundP.x
   local ROUND_Y2 = roundP and roundP.y2
   local ROUND_Y1 = roundP and roundP.y1
@@ -718,6 +723,11 @@ function HF.build(provider, x0, y0, cols, rows, opts)
             local bi, bj = i - i % blk, j - j % blk
             local by = cy * CELL + bj * VOXEL + blk * 2
             off, shade = relief(cx * CELL + bi * VOXEL + blk * 2, kk * by + cc, lo, hi)
+            if dome and crownVox then
+              -- (reshaped later from the art, near the gaps it shows;
+              -- elsewhere -- a jungle with no gaps -- the dome below stays)
+              crownVox[vindex(vx, vy)] = h
+            end
             if dome then
               -- the crown's shape comes from the dome, not the art
               local dy, dx
@@ -1710,6 +1720,147 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       end
     end
     grid.gapFills = #fills
+    -- (a gap filled between two crowns is crown too)
+    if crownVox then
+      for _, f in ipairs(fills) do
+        for j = 0, PER - 1 do
+          for i = 0, PER - 1 do
+            local k = vindex((f[1] - x0) * PER + i, (f[2] - y0) * PER + j)
+            if F[k] then crownVox[k] = H[k] end
+          end
+        end
+      end
+    end
+  end
+
+  -- Tree crowns from their art (opts.trees == "art").  Rounding every
+  -- 16 px column made a forest a row of ridges -- "walls", "boundaries" --
+  -- because a tree in the art is two cells wide, or sits across two.  Here
+  -- each voxel of a forest's top is judged by the art painted on it: leaf
+  -- (the crowns' greens) or not (the teal ground showing between trees,
+  -- the dark outline round each crown).  The top then falls away with the
+  -- distance to the nearest non-leaf voxel, so every crown the art draws
+  -- comes out as its own rounded mound, wherever it sits in the grid, and
+  -- the forest's edge rounds off with it.  Heights snap to 2 px so the
+  -- mesher still merges the flat middles.
+  if crownVox and next(crownVox) then
+    -- px down at 0, 1, 2 voxels from the edge of a crown (opts.crown "lite":
+    -- two steps of 4 px -- fewer distinct heights, fewer vertices)
+    local CROWN = opts.crown == "lite" and { [0] = 8, 4 } or { [0] = 10, 5, 2 }
+    local leaf = {}
+    local INF = 99
+    local dist = {}
+    for k, h in pairs(crownVox) do
+      tick()
+      local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+      local wx = grid.px + vx * VOXEL + 2
+      local wy = grid.py + vy * VOXEL + 2
+      local r, g, b = color(wx, K[k] * wy + C[k])
+      local isLeaf, gap = false, false
+      if r then
+        local l = luminance(r, g, b)
+        -- leaf: a clear green; a gap between crowns: the teal ground (blue
+        -- nearly as strong as green) or the dark outline.  Anything else --
+        -- a mailbox, a sign, a fence standing in a hedge -- is neither, and
+        -- keeps its height and its shape.
+        isLeaf = g > r * 1.05 and b < g * 0.6 and l >= 0.3
+        -- (teal, not white: a mailbox's white is as blue as it is green)
+        gap = not isLeaf and ((r < g * 0.75 and b >= g * 0.6) or (l < 0.3 and g >= r))
+        -- (dark: a crown's outline -- or only the shading inside a big
+        -- tree, decided below)
+        if gap and l < 0.3 and not (r < g * 0.75 and b >= g * 0.6) then gap = "dark" end
+      else
+        isLeaf = true -- (no art: left as it is)
+      end
+      leaf[k] = isLeaf
+      if not isLeaf and not gap then crownVox[k] = nil end
+      dist[k] = isLeaf and INF or (gap and 0 or INF)
+      if gap == "dark" then dist[k] = "dark" end
+    end
+    -- Dark art is a gap between crowns only where it borders the teal
+    -- ground or the forest's edge (within two voxels): the outline round a
+    -- crown.  Dark patches inside a canopy (Viridian Forest's big trees
+    -- are shaded that way) are leaf: as gaps they dimpled the forest all
+    -- over, a busy jumble of little mounds.
+    do
+      local turn = {}
+      for k, v in pairs(dist) do
+        if v == "dark" then
+          local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+          local edge = false
+          for oy = -2, 2 do
+            for ox = -2, 2 do
+              local x, y = vx + ox, vy + oy
+              if x >= 0 and y >= 0 and x < vcols and y < vrows then
+                local n = y * vcols + x + 1
+                local dn = dist[n]
+                if dn == nil or dn == 0 then edge = true end
+              end
+            end
+          end
+          turn[k] = edge and 0 or INF
+        end
+      end
+      for k, v in pairs(turn) do dist[k] = v end
+    end
+    -- chamfer distance, in voxels, within the crowns (whatever is not
+    -- crown counts as an edge: a forest rounds off where it ends)
+    local function d(k) return dist[k] or 0 end
+    for vy = 0, vrows - 1 do
+      if vy % 16 == 0 then tick() end
+      for vx = 0, vcols - 1 do
+        local k = vy * vcols + vx + 1
+        local v = dist[k]
+        if v and v > 0 then
+          local m = v
+          if vx > 0 then m = min(m, d(k - 1) + 1) end
+          if vy > 0 then
+            m = min(m, d(k - vcols) + 1)
+            if vx > 0 then m = min(m, d(k - vcols - 1) + 1) end
+            if vx < vcols - 1 then m = min(m, d(k - vcols + 1) + 1) end
+          end
+          dist[k] = m
+        end
+      end
+    end
+    for vy = vrows - 1, 0, -1 do
+      if vy % 16 == 0 then tick() end
+      for vx = vcols - 1, 0, -1 do
+        local k = vy * vcols + vx + 1
+        local v = dist[k]
+        if v and v > 0 then
+          local m = v
+          if vx < vcols - 1 then m = min(m, d(k + 1) + 1) end
+          if vy < vrows - 1 then
+            m = min(m, d(k + vcols) + 1)
+            if vx < vcols - 1 then m = min(m, d(k + vcols + 1) + 1) end
+            if vx > 0 then m = min(m, d(k + vcols - 1) + 1) end
+          end
+          dist[k] = m
+        end
+      end
+    end
+    -- Only near a gap the art shows: a crown is 8 voxels across, so every
+    -- voxel of a crown with gaps round it lies within 5 of one.  Further
+    -- (Fortree's jungle, Route 119: leaf on leaf, no ground between) the
+    -- classic dome stays -- shaped from nothing it lay as one flat carpet.
+    local shaped = 0
+    for k, h in pairs(crownVox) do
+      local dk = dist[k]
+      if type(dk) == "number" and dk <= 5 then
+        local drop = CROWN[dk] or 0
+        if drop > h * 0.5 then drop = floor(h * 0.25) * 2 end
+        -- the art's row as it was before the dome lowered this voxel
+        local oldTop = H[k]
+        local cc = C[k] - ((oldTop < h) and (h - oldTop) or 0)
+        local top = h - drop
+        H[k] = top
+        if top < h then S[k], C[k] = top, cc + (h - top) else S[k], C[k] = h, cc end
+        L[k] = floor((1 - 0.02 * drop) * 32 + 0.5) / 32
+        shaped = shaped + 1
+      end
+    end
+    grid.crownVoxels = shaped
   end
 
   -- RSE: roofs side by side on one front wall are one building even when

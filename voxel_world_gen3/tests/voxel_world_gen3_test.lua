@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.31.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.32.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -25,6 +25,9 @@ do
   local preRow
   for _, row in ipairs(schema or {}) do if row.key == "prebuild" then preRow = row end end
   T.check(preRow ~= nil and preRow.type == "toggle" and preRow.default == false, "PRE-BUILD AT START is a toggle, off by default")
+  local tsRow
+  for _, row in ipairs(schema or {}) do if row.key == "treeStyle" then tsRow = row end end
+  T.check(tsRow ~= nil and tsRow.default == "rounded", "TREE STYLE defaults to ROUNDED")
   -- with no pre-build up, the per-step hook never touches the player's input
   do
     local resets = 0
@@ -1927,6 +1930,54 @@ do
   local g = HF.build(provider, 0, 0, 6, 7, { lumps = false })
   local h = g.H[(0 * 4 + 1) * g.vcols + 2 * 4 + 1 + 1]
   T.check(h <= 8, "a fence beside a building and trees stays knee-high (" .. tostring(h) .. ")")
+end
+
+do
+  -- TREE STYLE ROUNDED: a forest of two-cell-wide crowns drawn in the art
+  -- (leaf green on teal) gets a rounded top per crown: its middle stays
+  -- high, its rim drops, and a teal gap between two crowns is low
+  local W, Hc = 12, 4
+  local function cellF(cx, cy)
+    return { kind = "solid", tree = true, mid = 1, pair = "P", map = "M" }
+  end
+  local function colorF(wx, wy)
+    -- crowns 32 px wide, 6 px of teal between them
+    local u = wx % 38
+    if u >= 32 then return 0.45, 0.80, 0.64 end
+    return 0.22, 0.58, 0.19
+  end
+  local function build(trees)
+    return HF.build({ cell = cellF, color = colorF }, 0, 0, W, Hc,
+      { round = "soft", lumps = true, reliefBlock = 2, reliefStep = 4, trees = trees, rock = false })
+  end
+  local a, b = build(nil), build("art")
+  local function top(g, vx, vy) return g.H[vy * g.vcols + vx + 1] end
+  local vy = 6
+  local mid, gap = 4, math.floor(34 / 4)
+  T.check((b.crownVoxels or 0) > 0, "ROUNDED shapes crown voxels (" .. tostring(b.crownVoxels) .. ")")
+  T.check(top(b, gap, vy) < top(b, mid, vy), "a teal gap between crowns lies lower than a crown's middle")
+  T.check(a.crownVoxels == nil, "CLASSIC leaves the crowns alone")
+end
+
+do
+  -- FireRed/LeafGreen whole maps: the tileset-art gate judges each tileset
+  -- by itself.  One tileset that never matches the screen (0%) must not
+  -- keep every other map from being built whole (pooled, it did).
+  love = love or {}
+  love.timer = love.timer or { getTime = os.clock }
+  local B = use("bridge")
+  local st = B._state
+  local saved = st.artCheck
+  st.artCheck = { pallet = { n = 300, ok = 300, sw = 0 }, house = { n = 250, ok = 245, sw = 0 },
+    general_bad = { n = 4000, ok = 0, sw = 0 }, _all = { n = 4550, ok = 545, sw = 0 } }
+  T.eq(B._artPairVerdict(st.artCheck.general_bad), "bad", "a tileset that never matches fails on its own")
+  T.eq(B._artBorrowed(), "ok", "unchecked tilesets borrow from the passing ones, not the pool")
+  T.check(B._tileArtReady({ layout = { pair = "pallet" } }) == true, "a map on a matching tileset is built whole")
+  T.check(B._tileArtReady({ layout = { pair = "route_x" } }) == true, "a map on an unchecked tileset borrows")
+  T.check(B._tileArtReady({ layout = { pair = "general_bad" } }) == false, "a map on the failing tileset is not")
+  st.artCheck = { a = { n = 50, ok = 50, sw = 0 } }
+  T.check(B._tileArtReady({ layout = { pair = "a" } }) == false, "under 200 samples: not yet")
+  st.artCheck = saved
 end
 
 T.finish("voxel_world_gen3")

@@ -148,7 +148,8 @@ local function roundOf(q)
 end
 
 local function reliefKey(q)
-  local r = tostring(roundOf(q))
+  -- (TREE STYLE: a change rebuilds, like the relief)
+  local r = tostring(roundOf(q)) .. (settings.treeStyle == "rounded" and "/art" or "")
   if not settings.lumps then return "off:" .. r end
   return q.blk .. ":" .. q.step .. ":" .. r
 end
@@ -1148,11 +1149,44 @@ local NEAR_FRAME_MAX = 1 / 30-- ...and no frame above this in the last second
 local NEAR_SETTLE = 3      -- seconds after arriving on a map before starting
 local WHOLE_BUDGET = 0.003
 
-local function tileArtReady()
-  local all = state.artCheck and state.artCheck._all
-  if not (all and all.n >= 200) then return false end
-  return math.max(all.ok, all.sw) / all.n >= 0.8
+-- The verdict on the tilesets' art, by what the screen showed.  A tileset
+-- checked on its own (200 samples) passes or fails by itself; one not
+-- checked yet borrows the verdict of the tilesets that did pass (the
+-- atlases are all made the same way).  (Pooled over every tileset seen, one
+-- that never matches -- FireRed's "general" with an animated or swapped
+-- palette, 0% -- dragged the pool under 80%, and no FireRed map was built
+-- whole for the rest of the session.)
+local function artPairVerdict(ck)
+  if not (ck and ck.n >= 200) then return nil end
+  local swap = ck.sw > ck.ok
+  if (swap and ck.sw or ck.ok) / ck.n >= 0.8 then return swap and "swap" or "ok" end
+  return "bad"
 end
+
+local function artBorrowed()
+  local ac = state.artCheck
+  if not ac then return nil end
+  local ok, sw, n = 0, 0, 0
+  for pr, ck in pairs(ac) do
+    if pr ~= "_all" then
+      local v = artPairVerdict(ck)
+      if v == "ok" or v == "swap" then ok, sw, n = ok + ck.ok, sw + ck.sw, n + ck.n end
+    end
+  end
+  if n < 200 then return nil end
+  return sw > ok and "swap" or "ok"
+end
+
+-- provider: the map to build -- its own tileset must not be one that failed
+local function tileArtReady(provider)
+  local ac = state.artCheck
+  local own = provider and provider.layout and provider.layout.pair
+  if own and ac and artPairVerdict(ac[own]) == "bad" then return false, "its tileset art does not match the screen" end
+  if own and ac and artPairVerdict(ac[own]) then return true end
+  if artBorrowed() then return true end
+  return false, "tileset art not checked yet"
+end
+Bridge._artBorrowed, Bridge._artPairVerdict, Bridge._tileArtReady = artBorrowed, artPairVerdict, tileArtReady
 
 local function wholeKey(provider)
   local q = preset()
@@ -1160,7 +1194,8 @@ local function wholeKey(provider)
     -- (not the relief detail: AUTO stepping down a tier threw away a whole
     -- map nearly built; it keeps the detail it was built with)
     tostring(settings.lumps), tostring(settings.sunShadows), tostring(settings.roofs),
-    tostring(settings.falls ~= false), settings.sunShadows and sunKeyFor(provider.def) or "-" }, "|")
+    tostring(settings.falls ~= false), settings.sunShadows and sunKeyFor(provider.def) or "-",
+    tostring(settings.treeStyle or "classic") }, "|")
 end
 
 local function mapSize(def)
@@ -1199,7 +1234,8 @@ local function wholeEligible(provider, view, fcx, fcy)
     if cov < 0.6 then return false, ("seen %d%% of its tiles, needs 60%%"):format(math.floor(cov * 100)) end
     return true
   end
-  if not tileArtReady() then return false, "tileset art not checked yet" end
+  local okA, whyA = tileArtReady(provider)
+  if not okA then return false, whyA end
   return true
 end
 
@@ -1391,17 +1427,11 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       -- checked and does not match never is
       local function verdict()
         if not (c and not c.border and c.pair) then return nil end
-        local ck = artCheck[c.pair]
-        if ck and ck.n >= 200 then
-          local swap = ck.sw > ck.ok
-          if (swap and ck.sw or ck.ok) / ck.n >= 0.8 then return swap and "swap" or "ok" end
-          return nil
-        end
-        local all = artCheck._all
-        if all and all.n >= 200 then
-          local swap = all.sw > all.ok
-          if (swap and all.sw or all.ok) / all.n >= 0.8 then return swap and "swap" or "ok", true end
-        end
+        local own = artPairVerdict(artCheck[c.pair])
+        if own == "bad" then return nil end
+        if own then return own end
+        local b = artBorrowed()
+        if b then return b, true end
         return nil
       end
       local v, borrowed = verdict()
@@ -1509,6 +1539,8 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       kindMemo = Bridge.kindMemo(provider.mapId, MapW and MapW.world, provider.revision, provider.def),
       town = Bridge.isTown(provider.def),
       reliefBlock = q.blk, reliefStep = q.step, round = roundOf(q),
+      -- TREE STYLE ROUNDED: crowns shaped by their own art (heightfield.lua)
+      trees = settings.treeStyle == "rounded" and "art" or nil,
       roofs = settings.roofs and isOutdoor(provider.def),
       -- RSE draws its roofs ridged east-west (gable trim down the sides)
       ridge = (function() local f = Cells.family and Cells.family() return (f and f ~= "frlg") and "ew" or "ns" end)(),
@@ -2945,6 +2977,9 @@ function Bridge.install()
           text = text .. ("  cave %d/%d  roofs %d %s  gaps %d  ptree %d/%d/%d"):format(g and g.caveMounds or 0,
             g and g.caveFlat or 0, #rf, rf[1] and rf[1].ridge or "-", g and g.gapFills or 0, g and g.patternTrees or 0,
             g and g.patternCand or 0, g and g.crownCells or 0)
+          -- TREE STYLE: which, and how many crown voxels the art shaped
+          text = text .. ("  trees %s %d"):format(settings.treeStyle == "rounded" and "ROUNDED" or "CLASSIC",
+            g and g.crownVoxels or 0)
           text = text .. "  blink " .. tostring(Scene.blinkFrames or 0)
           do
             local cs = Critters._state
@@ -2953,7 +2988,7 @@ function Bridge.install()
             for pr, ck in pairs(state.artCheck or {}) do
               if ck.n > 0 and pr ~= "_all" then
                 text = text .. (" %s:%d%%%s"):format(tostring(pr):sub(1, 14), math.floor(100 * math.max(ck.ok, ck.sw) / ck.n),
-                  ck.sw > ck.ok and "sw" or "")
+                  (ck.sw > ck.ok and "sw" or "") .. (artPairVerdict(ck) == "bad" and ("(" .. ck.n .. ")") or ""))
               end
             end
             local fs = Footprints._state
