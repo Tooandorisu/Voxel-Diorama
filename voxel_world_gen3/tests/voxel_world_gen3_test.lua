@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.32.0", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.32.1", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1957,6 +1957,22 @@ do
   T.check((b.crownVoxels or 0) > 0, "ROUNDED shapes crown voxels (" .. tostring(b.crownVoxels) .. ")")
   T.check(top(b, gap, vy) < top(b, mid, vy), "a teal gap between crowns lies lower than a crown's middle")
   T.check(a.crownVoxels == nil, "CLASSIC leaves the crowns alone")
+  -- ROUNDED+: a crown whose art is shaded darker toward its neighbour lies
+  -- lower there than ROUNDED leaves it, its sunlit middle as high
+  local function colorS(wx, wy)
+    local u = wx % 38
+    if u >= 32 then return 0.45, 0.80, 0.64 end
+    if u < 6 or u >= 26 then return 0.14, 0.40, 0.12 end -- the shade between crowns
+    return 0.40, 0.80, 0.30
+  end
+  local function buildS(plus)
+    return HF.build({ cell = cellF, color = colorS }, 0, 0, W, Hc,
+      { round = "soft", lumps = true, reliefBlock = 2, reliefStep = 4, trees = "art", rock = false,
+        crownGap = plus and "shade" or nil, crownShade = plus and "two" or nil })
+  end
+  local r0, r1 = buildS(false), buildS(true)
+  T.check(top(r1, 7, vy) < top(r0, 7, vy), "ROUNDED+ lowers the shaded rim of a crown")
+  T.eq(top(r1, 4, vy), top(r0, 4, vy), "ROUNDED+ keeps a crown's sunlit middle")
 end
 
 do

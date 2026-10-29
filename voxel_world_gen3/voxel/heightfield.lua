@@ -489,9 +489,16 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- Each raised floor stands one level (16px) per elevation step, and a
   -- cliff is as tall as the floor on top of it (below).
   local LEVEL = snap(16 * scale)
+  -- Outdoors too (opts.terrain): Mossdeep's terraces, the Space Center's
+  -- hill, Route 115's plateau, the Safari Zone's steps -- the same
+  -- elevation the game keeps for every walkable cell, so ground at a higher
+  -- level stands on its cliff instead of lying flat behind a wall of rock.
+  -- (Only elevation the game stores: a ledge or a cliff on one level --
+  -- most FireRed routes -- stays on it.)
+  local terrain = opts.terrain == true and not opts.cave and opts.indoor ~= true
   local floorCache = {}
   local function floorOf(cx, cy)
-    if not opts.cave then return 0 end
+    if not (opts.cave or terrain) then return 0 end
     local key = (cy - y0 + 64) * 65536 + (cx - x0 + 64)
     local f = floorCache[key]
     if f ~= nil then return f or nil end
@@ -517,7 +524,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     return f or nil
   end
   HF._floorOf = floorOf -- for tests
-  if opts.cave then
+  if opts.cave or terrain then
     for cy = y0, y0 + rows - 1 do
       tick()
       for cx = x0, x0 + cols - 1 do
@@ -529,6 +536,61 @@ function HF.build(provider, x0, y0, cols, rows, opts)
               local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
               -- (S: a floor's open side shows the art below it, not a smear)
               H[k], S[k], FL[k] = H[k] + f, f, f
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- Stairs (opts.terrain): a walkable cell between two levels -- elevation
+  -- 0 or 15, "either level" -- climbs from the one to the other, in 4 px
+  -- steps across the run of such cells, so the stairs in the art are stairs.
+  -- Its floor (FL) climbs with it: whoever walks up them rises step by step.
+  grid.stairs = 0
+  if terrain then
+    local function walkC(c)
+      return c and (c.kind == "ground" or c.kind == "grass" or c.kind == "door")
+    end
+    local function between(c) return c.elev == 0 or c.elev == 15 end
+    -- the level at the far end of a run of in-between cells, and how many
+    -- of them lie on the way (nil past 6: not stairs)
+    local function levelAt(x, y, dx, dy)
+      for n = 1, 6 do
+        local c = at(x + dx * n, y + dy * n)
+        if not walkC(c) then return nil end
+        if not between(c) then
+          local e = c.elev
+          if not e then return nil end
+          return max(0, e - 3) * LEVEL, n - 1
+        end
+      end
+      return nil
+    end
+    for cy = y0, y0 + rows - 1 do
+      tick()
+      for cx = x0, x0 + cols - 1 do
+        local c = at(cx, cy)
+        if walkC(c) and between(c) and not c.border then
+          local a, na = levelAt(cx, cy, 0, -1)
+          local b, nb = levelAt(cx, cy, 0, 1)
+          local ns = true
+          if not (a and b and a ~= b) then
+            a, na = levelAt(cx, cy, -1, 0)
+            b, nb = levelAt(cx, cy, 1, 0)
+            ns = false
+          end
+          if a and b and a ~= b then
+            grid.stairs = grid.stairs + 1
+            local run = (na + nb + 1) * PER
+            for j = 0, PER - 1 do
+              for i = 0, PER - 1 do
+                local pos = ns and (na * PER + j) or (na * PER + i)
+                local t = (pos + 0.5) / run
+                local f = floor((a + (b - a) * t) / VOXEL + 0.5) * VOXEL
+                local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
+                H[k], S[k], FL[k] = f, f, f
+              end
             end
           end
         end
@@ -1513,9 +1575,23 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         if small then base = HF.runHeight(min(cells, 2), false) end
         local h = snap(base * scale)
         if h < VOXEL then h = VOXEL end
-        if opts.cave then
+        if opts.cave or terrain then
           local up, dn = floorOf(cx, top - 1), floorOf(cx, bottom + 1)
-          if up and up > (dn or 0) then
+          -- (outdoors a house or a tree in front of a terrace stands on the
+          -- ground in front of it; anything else between two floors is the
+          -- terrace's cliff -- a one-cell band of cliff art, too small to
+          -- be judged rock, stood as a knee-high slab under a terrace two
+          -- storeys up, the rest of its face bare grass)
+          local house = false
+          if terrain and up and up > (dn or 0) and not rock then
+            for ddx = -3, 3 do
+              for y = top, bottom + 1 do
+                local c = at(cx + ddx, y)
+                if c and c.kind == "door" and not c.caveDoor then house = true end
+              end
+            end
+          end
+          if up and up > (dn or 0) and (opts.cave or rock or not (house or tree or foliage)) then
             -- a cliff (however shallow) is as tall as the floor it holds up
             h = up
           elseif rock then
@@ -1572,7 +1648,24 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         cy = bottom + 1
       else
         local c = at(cx, cy)
-        if c and c.kind == "ledge" and cy >= y0 then
+        if c and c.kind == "ledge" and cy >= y0 and terrain then
+          -- (opts.terrain) a bank: high on the side you jump from, down to
+          -- the ground on the side you land -- a lip of earth, not a slab
+          -- (the hop itself is the game's, unchanged)
+          local dir = ({ [0xA0] = "E", [0xA1] = "W", [0xA2] = "N", [0xA3] = "S" })[c.coll or 0xA3] or "S"
+          local f0 = floorOf(cx, cy) or 0
+          local BANK = { 8, 8, 6, 3 }
+          stamp(cx, cy, cy, 8 + f0, false, nil)
+          for j = 0, PER - 1 do
+            for i = 0, PER - 1 do
+              local q = (dir == "S" and j) or (dir == "N" and PER - 1 - j) or (dir == "E" and i) or (PER - 1 - i)
+              local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
+              local top = f0 + BANK[q + 1]
+              H[k] = top
+              if top < S[k] then C[k] = C[k] + (S[k] - top); S[k] = top end
+            end
+          end
+        elseif c and c.kind == "ledge" and cy >= y0 then
           stamp(cx, cy, cy, 4 + (floorOf(cx, cy) or 0), false, nil)
         end
         cy = cy + 1
@@ -1748,6 +1841,8 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- two steps of 4 px -- fewer distinct heights, fewer vertices)
     local CROWN = opts.crown == "lite" and { [0] = 8, 4 } or { [0] = 10, 5, 2 }
     local leaf = {}
+    local tealGap = {} -- gaps that are the ground painted between trees
+    local lumOf = {}
     local INF = 99
     local dist = {}
     for k, h in pairs(crownVox) do
@@ -1769,10 +1864,12 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         -- (dark: a crown's outline -- or only the shading inside a big
         -- tree, decided below)
         if gap and l < 0.3 and not (r < g * 0.75 and b >= g * 0.6) then gap = "dark" end
+        if gap == true then tealGap[k] = true end
       else
         isLeaf = true -- (no art: left as it is)
       end
       leaf[k] = isLeaf
+      lumOf[k] = r and luminance(r, g, b) or nil
       if not isLeaf and not gap then crownVox[k] = nil end
       dist[k] = isLeaf and INF or (gap and 0 or INF)
       if gap == "dark" then dist[k] = "dark" end
@@ -1844,12 +1941,109 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- voxel of a crown with gaps round it lies within 5 of one.  Further
     -- (Fortree's jungle, Route 119: leaf on leaf, no ground between) the
     -- classic dome stays -- shaped from nothing it lay as one flat carpet.
+    local DEEP = { [0] = 0.72, 0.42, 0.2, 0.08 }
+    -- a gap voxel open to the ground outside the forest (within 2 voxels of
+    -- something low that is not crown)
+    local function edgeGap(k)
+      local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+      for oy = -2, 2 do
+        for ox = -2, 2 do
+          local x, y = vx + ox, vy + oy
+          if x >= 0 and y >= 0 and x < vcols and y < vrows then
+            local n = y * vcols + x + 1
+            if crownVox[n] == nil and (H[n] or 0) <= 8 then return true end
+          end
+        end
+      end
+      return false
+    end
+    local deepGaps = opts.crownGap == "deep"
+    -- distance (voxels, 4-way, up to 3) to the nearest painted-ground gap
+    local tdist = {}
+    if deepGaps then
+      -- only the painted ground open to the outside of the forest: the
+      -- notches between the crowns along its edge (deep inside, slots
+      -- between every pair of trees read as grooves down the rows again)
+      local open = {}
+      local oq, oh = {}, 1
+      for k in pairs(tealGap) do
+        if crownVox[k] and edgeGap(k) then open[k] = true; oq[#oq + 1] = k end
+      end
+      while oh <= #oq do
+        local k = oq[oh]; oh = oh + 1
+        local vx = (k - 1) % vcols
+        for _, n in ipairs({ vx > 0 and k - 1 or nil, vx < vcols - 1 and k + 1 or nil, k - vcols, k + vcols }) do
+          if n and tealGap[n] and crownVox[n] and not open[n] then open[n] = true; oq[#oq + 1] = n end
+        end
+      end
+      local q, qh = {}, 1
+      for k in pairs(open) do tdist[k] = 0; q[#q + 1] = k end
+      while qh <= #q do
+        local k = q[qh]; qh = qh + 1
+        local d = tdist[k] + 1
+        if d <= 3 then
+          local vx = (k - 1) % vcols
+          for _, n in ipairs({ vx > 0 and k - 1 or nil, vx < vcols - 1 and k + 1 or nil, k - vcols, k + vcols }) do
+            if n and crownVox[n] and tdist[n] == nil then tdist[n] = d; q[#q + 1] = n end
+          end
+        end
+        if qh % 4096 == 0 then tick() end
+      end
+    end
     local shaped = 0
     for k, h in pairs(crownVox) do
       local dk = dist[k]
       if type(dk) == "number" and dk <= 5 then
-        local drop = CROWN[dk] or 0
+        local drop = (type(dk) == "number" and CROWN[dk]) or 0
+        -- (a low crown -- a hedge, a two-cell tree -- drops at most a
+        -- quarter of its height; the art's shading below may take it further)
         if drop > h * 0.5 then drop = floor(h * 0.25) * 2 end
+        if opts.crownGap == "shade" then
+          -- (opts.crownGap "shade") the crown follows its own shading: the
+          -- art's darkest greens -- the shadow it paints where one crown
+          -- meets the next -- lie lowest, its sunlit leaves highest.
+          -- Smoothed over 3x3 voxels, so one dark pixel is not a pit.
+          local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+          local sum, n = 0, 0
+          for oy = -1, 1 do
+            for ox = -1, 1 do
+              local x, y = vx + ox, vy + oy
+              if x >= 0 and y >= 0 and x < vcols and y < vrows then
+                local l = lumOf[y * vcols + x + 1]
+                if l then sum, n = sum + l, n + 1 end
+              end
+            end
+          end
+          -- (only near a gap the art shows, like the rest: a jungle with no
+          -- ground between its trees keeps its classic shape; in 4 px steps,
+          -- fewer distinct heights for the mesher to keep apart)
+          if n > 0 then
+            local t = (0.6 - sum / n) / 0.3
+            if t > 0 then
+              if t > 1 then t = 1 end
+              -- (opts.crownShade "two": one step only -- darker than the
+              -- middle of the range goes down, the rest stays: two heights,
+              -- far fewer faces to mesh)
+              local d2 = floor(h * 0.55 * t / 4 + 0.5) * 4
+              if opts.crownShade == "two" then d2 = t >= 0.5 and floor(h * (opts.crownShadeDepth or 0.4) / 4 + 0.5) * 4 or 0 end
+              if d2 > drop then drop = d2 end
+            end
+          end
+        end
+        local td = deepGaps and tdist[k]
+        if td and td <= 3 then
+          -- (opts.crownGap "deep") where the art paints the ground between
+          -- two trees, the gap goes most of the way down: the crowns stand
+          -- apart instead of on a shelf two-thirds up that joined them.  At
+          -- the forest's open edge, right down to the ground.  (Only the
+          -- painted ground: the dark outline round a crown stays a shallow
+          -- dip -- deep, it cut grooves down the middle of big trees.)
+          local f = DEEP[td] or 0
+          if td == 0 then f = 1 end
+          local d2 = floor(h * f / 2) * 2
+          if d2 > h - 2 then d2 = h - 2 end
+          if d2 > drop then drop = d2 end
+        end
         -- the art's row as it was before the dome lowered this voxel
         local oldTop = H[k]
         local cc = C[k] - ((oldTop < h) and (h - oldTop) or 0)
