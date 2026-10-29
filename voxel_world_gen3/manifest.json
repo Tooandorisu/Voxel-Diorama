@@ -1,7 +1,7 @@
 {
   "id": "voxel_world_gen3",
   "name": "Voxel Diorama (Gen 3)",
-  "version": "1.32.1",
+  "version": "1.32.2",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",

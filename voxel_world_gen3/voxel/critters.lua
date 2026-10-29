@@ -20,7 +20,10 @@ local state = {
 Critters._state = state
 
 -- gather spots from a freshly built grid (a sample: every few voxels)
-function Critters.setSpots(grid, VOXEL)
+-- skip(x, y): true for a spot nothing should live over -- the border tiling
+-- past the loaded maps, which has no art on screen and lies black at night
+-- (Lucaskiu: fireflies swarming over the black around Fuchsia City)
+function Critters.setSpots(grid, VOXEL, skip)
   VOXEL = VOXEL or 4
   local trees, low = {}, {}
   local SW, H = grid.SW, grid.H
@@ -32,8 +35,10 @@ function Critters.setSpots(grid, VOXEL)
         if SW[k] then
           local h = H[k] or 0
           local x, y = grid.px + (vx + 0.5) * VOXEL, grid.py + (vy + 0.5) * VOXEL
-          if h >= 10 then trees[#trees + 1] = { x, y, h } end
-          low[#low + 1] = { x, y, h }
+          if not (skip and skip(x, y)) then
+            if h >= 10 then trees[#trees + 1] = { x, y, h } end
+            low[#low + 1] = { x, y, h }
+          end
         end
       end
     end
