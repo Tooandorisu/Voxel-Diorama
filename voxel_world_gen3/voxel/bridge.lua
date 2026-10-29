@@ -149,7 +149,8 @@ end
 
 local function reliefKey(q)
   -- (TREE STYLE: a change rebuilds, like the relief)
-  local r = tostring(roundOf(q)) .. (settings.treeStyle == "rounded" and "/art" or "")
+  local ts = settings.treeStyle
+  local r = tostring(roundOf(q)) .. ((ts == "rounded" and "/art") or (ts == "roundedplus" and "/art+") or "")
   if not settings.lumps then return "off:" .. r end
   return q.blk .. ":" .. q.step .. ":" .. r
 end
@@ -1540,7 +1541,11 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       town = Bridge.isTown(provider.def),
       reliefBlock = q.blk, reliefStep = q.step, round = roundOf(q),
       -- TREE STYLE ROUNDED: crowns shaped by their own art (heightfield.lua)
-      trees = settings.treeStyle == "rounded" and "art" or nil,
+      trees = (settings.treeStyle == "rounded" or settings.treeStyle == "roundedplus") and "art" or nil,
+      -- ROUNDED+: the crowns also dip where their own art is shaded darkest
+      -- -- where one crown meets the next -- in one step (heightfield.lua)
+      crownGap = settings.treeStyle == "roundedplus" and "shade" or nil,
+      crownShade = settings.treeStyle == "roundedplus" and "two" or nil,
       roofs = settings.roofs and isOutdoor(provider.def),
       -- RSE draws its roofs ridged east-west (gable trim down the sides)
       ridge = (function() local f = Cells.family and Cells.family() return (f and f ~= "frlg") and "ew" or "ns" end)(),
@@ -2978,7 +2983,8 @@ function Bridge.install()
             g and g.caveFlat or 0, #rf, rf[1] and rf[1].ridge or "-", g and g.gapFills or 0, g and g.patternTrees or 0,
             g and g.patternCand or 0, g and g.crownCells or 0)
           -- TREE STYLE: which, and how many crown voxels the art shaped
-          text = text .. ("  trees %s %d"):format(settings.treeStyle == "rounded" and "ROUNDED" or "CLASSIC",
+          text = text .. ("  trees %s %d"):format((settings.treeStyle == "rounded" and "ROUNDED")
+            or (settings.treeStyle == "roundedplus" and "ROUNDED+") or "CLASSIC",
             g and g.crownVoxels or 0)
           text = text .. "  blink " .. tostring(Scene.blinkFrames or 0)
           do

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.32.1
+
+- TREE STYLE: new choice ROUNDED+ (ROUNDED stays the default; CLASSIC
+  stays too).  On top of ROUNDED, each crown dips where its own art is
+  shaded darkest -- the dark green FireRed paints where one crown meets the
+  next -- so the green shelf joining neighbouring crowns lies lower and the
+  trees read a little more as separate trees.  Only near the gaps the art
+  shows: Fortree's jungle is unchanged.  Whole maps up to +20% vertices
+  over ROUNDED (Pallet; Viridian Forest about the same).
+
 ## 1.32.0
 
 - Rounded trees.  New option TREE STYLE, ROUNDED by default (CLASSIC is
