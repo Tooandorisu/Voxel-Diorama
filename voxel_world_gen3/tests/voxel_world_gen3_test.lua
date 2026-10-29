@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.32.1", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.32.2", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1994,6 +1994,20 @@ do
   st.artCheck = { a = { n = 50, ok = 50, sw = 0 } }
   T.check(B._tileArtReady({ layout = { pair = "a" } }) == false, "under 200 samples: not yet")
   st.artCheck = saved
+end
+
+do
+  -- fireflies and birds never spawn over the border tiling (it has no art
+  -- and lies black at night: Lucaskiu's fireflies over Fuchsia's black)
+  local Cr = use("critters")
+  local g = { vcols = 16, vrows = 16, px = 0, py = 0, SW = {}, H = {} }
+  for i = 1, 256 do g.SW[i], g.H[i] = true, 16 end
+  Cr.setSpots(g, 4)
+  local all = #Cr._state.low
+  Cr.setSpots(g, 4, function(x) return x >= 32 end) -- the east half is border
+  local kept = #Cr._state.low
+  T.check(all > 0 and kept > 0 and kept < all, "no critter spots over the border (" .. kept .. "/" .. all .. ")")
+  for _, sp in ipairs(Cr._state.low) do T.check(sp[1] < 32, "a spot over the map only") break end
 end
 
 T.finish("voxel_world_gen3")

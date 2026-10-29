@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.32.2
+
+- Fixed: fireflies (and birds) swarming over the black around a map at
+  night -- Fuchsia City, the Safari Zone (Lucaskiu).  They took the border
+  tiling past every loaded map for woods; it has no art on screen and lies
+  black.  They live over the map's own trees and grass now.
+
 ## 1.32.1
 
 - TREE STYLE: new choice ROUNDED+ (ROUNDED stays the default; CLASSIC

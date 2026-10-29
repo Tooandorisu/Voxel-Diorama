@@ -1260,12 +1260,27 @@ local function dropReplaced()
   end
 end
 
+-- critters: never over the border tiling past every loaded map
+local function borderSkip(provider, world)
+  local cellOf = provider and Bridge.cachedCells(provider, world)
+  if not cellOf then return nil end
+  local last, lastV
+  return function(x, y)
+    local cx, cy = math.floor(x / CELL), math.floor(y / CELL)
+    local key = cy * 65536 + cx
+    if key == last then return lastV end
+    local c = cellOf(cx, cy)
+    last, lastV = key, (c == nil) or c.border == true
+    return lastV
+  end
+end
+
 local function installWhole(e, provider, world)
   if WHOLE_DEBUG then print("whole: install", e.mapId, #e.pieces, e.verts, e.ms) end
   dropReplaced()
   Scene.setTerrainPieces(e.pieces)
   Scene.setLight(e.light, e.grid.px, e.grid.py, e.grid.vcols * HF.VOXEL, e.grid.vrows * HF.VOXEL, true)
-  Critters.setSpots(e.grid, HF.VOXEL)
+  Critters.setSpots(e.grid, HF.VOXEL, borderSkip(provider, world))
   Smoke.setStacks(e.grid)
   Falls.setFalls(e.grid, state.fallsMap == provider.mapId)
   state.fallsMap = provider.mapId
@@ -1671,7 +1686,8 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   -- light and pieces were drawn in between -- "Cannot use object after it
   -- has been released", then black until the next whole map was in)
   Scene.setTerrain(verts, idx, nv, ni, tick)
-  Critters.setSpots(grid, HF.VOXEL)
+  local Map0 = Engine.get("src.core.game3.map")
+  Critters.setSpots(grid, HF.VOXEL, borderSkip(provider, Map0 and Map0.world))
   Smoke.setStacks(grid)
   Falls.setFalls(grid, state.fallsMap == provider.mapId)
   state.fallsMap = provider.mapId
