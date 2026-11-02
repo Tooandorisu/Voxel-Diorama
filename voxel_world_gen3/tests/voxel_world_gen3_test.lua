@@ -16,7 +16,7 @@ do
   local run = T.sdk.loadMod(MOD, { generation = 3 })
   T.eq(#run.errors, 0, "loads clean on Gen 3 (" .. tostring(run.errors[1]) .. ")")
   local exports = run.loader.exports.voxel_world_gen3
-  T.check(type(exports) == "table" and exports.version == "1.32.2", "exports its version")
+  T.check(type(exports) == "table" and exports.version == "1.33.0", "exports its version")
   T.check(Runtime.wantsHook("input.key"), "claims the hotkey through input.key")
   T.check(Runtime.wantsHook("input.step"), "re-reads its options through input.step")
   local schema = run.loader.optionSchemas.voxel_world_gen3
@@ -1877,10 +1877,11 @@ do
   local hTop = HF.floorAt(g, 40, 98)
   local hFoot = HF.floorAt(g, 40, 142)
   T.check(hTop > hFoot and hTop > 10, "a swimmer rides up its slope")
-  local verts = Mesher.build(g, HF.VOXEL)
+  local verts, _, fnv = Mesher.build(g, HF.VOXEL)
   local streaming = 0
-  for _, v in ipairs(verts) do if math.abs(v[11] - 0.62) < 0.001 then streaming = streaming + 1 end end
+  for i = 1, fnv do local v = verts[i]; if math.abs(v[11] - 0.62) < 0.001 then streaming = streaming + 1 end end
   T.check(streaming >= 4, "the mesher lays the falling sheet, flagged for the shader")
+  T.check(rawget(verts, "packed") ~= nil and rawget(verts, 1) == nil, "the mesher packs its vertices (no table per vertex)")
   -- meshed in pieces (a whole map built ahead): every waterfall and roof
   -- exactly once, the same faces as in one piece
   local pieceFalls, pieceTris = 0, 0
@@ -2008,6 +2009,190 @@ do
   local kept = #Cr._state.low
   T.check(all > 0 and kept > 0 and kept < all, "no critter spots over the border (" .. kept .. "/" .. all .. ")")
   for _, sp in ipairs(Cr._state.low) do T.check(sp[1] < 32, "a spot over the map only") break end
+end
+
+do
+  -- RAISED GROUND: a field behind a three-cell rock cliff stands on it; the
+  -- field in front (by the sea) stays at ground level; a house on the
+  -- plateau stands on it; everything off without the option
+  local W, Hc = 8, 14
+  local function cellR(cx, cy)
+    if cy >= 12 then return { kind = "water", mid = 9 } end
+    if cy >= 5 and cy <= 7 then return { kind = "solid", mid = 2, cliff = true } end -- the cliff
+    if cy >= 1 and cy <= 3 and cx >= 2 and cx <= 4 then
+      return { kind = (cy == 3 and cx == 3) and "door" or "solid", mid = 3, warpDoor = cy == 3 or nil, behKnown = true }
+    end
+    return { kind = "ground", mid = 1 }
+  end
+  local function colorR(wx, wy)
+    local cy = math.floor(wy / 16)
+    if cy >= 5 and cy <= 7 then return 0.62, 0.48, 0.40 end -- rock
+    if cy >= 1 and cy <= 3 then return 0.85, 0.20, 0.20 end -- a red house
+    return 0.45, 0.75, 0.40
+  end
+  local function buildR(t)
+    return HF.build({ cell = cellR, color = colorR }, 0, -2, W, Hc + 2,
+      { round = "soft", lumps = false, rock = true, roofs = true, terrain = t })
+  end
+  local off, on = buildR(nil), buildR("art")
+  local function fl(g, cx, cy) local k = ((cy + 2) * 4 + 2) * g.vcols + cx * 4 + 2 + 1 return g.FL[k], g.H[k] end
+  local f1, h1 = fl(on, 6, 2)
+  local f0 = fl(on, 6, 9)
+  T.check((f1 or 0) >= 24, "the plateau behind the cliff is raised (" .. tostring(f1) .. ")")
+  T.check(f0 == nil or f0 == 0, "the ground by the sea stays down")
+  local _, hh = fl(on, 3, 2)
+  T.check(hh and h1 and hh > h1, "a house on the plateau stands on it")
+  local fo = fl(off, 6, 2)
+  T.check(fo == nil or fo == 0, "without RAISED GROUND nothing is raised")
+end
+
+do
+  -- ROCK TOPS: a mountain's top rounds off and dips along its art's seams;
+  -- only rock is touched, only ever lowered (at most 12 px), the ground,
+  -- the water and RAISED GROUND's floors stay as they were
+  local W, Hc = 12, 14
+  local function cellK(cx, cy)
+    if cy >= 12 then return { kind = "water", mid = 9 } end
+    if cx >= 2 and cx <= 9 and cy >= 2 and cy <= 8 then return { kind = "solid", mid = 2, cliff = true } end
+    return { kind = "ground", mid = 1 }
+  end
+  local function colorK(wx, wy)
+    local cx, cy = math.floor(wx / 16), math.floor(wy / 16)
+    if cx >= 2 and cx <= 9 and cy >= 2 and cy <= 8 then
+      if wx % 32 < 8 or wy % 48 < 8 then return 0.40, 0.28, 0.24 end -- the seams
+      return 0.66, 0.52, 0.44
+    end
+    if cy >= 12 then return 0.25, 0.40, 0.85 end
+    return 0.45, 0.75, 0.40
+  end
+  local function buildK(rocks, terrain)
+    return HF.build({ cell = cellK, color = colorK }, 0, -2, W, Hc + 2,
+      { round = "soft", lumps = false, rock = true, roofs = true, rocks = rocks, rockDepth = "deep", terrain = terrain })
+  end
+  local off, on = buildK(nil), buildK("art")
+  local lowered, raised, otherChanged, deepest = 0, 0, 0, 0
+  for k, h in pairs(off.H) do
+    local h2 = on.H[k]
+    if h2 ~= h then
+      if not off.R[k] and h > 8 then otherChanged = otherChanged + 1 end
+      if h2 > h then raised = raised + 1 else lowered = lowered + 1; deepest = math.max(deepest, h - h2) end
+    end
+  end
+  T.check((on.rockShaped or 0) > 0 and lowered > 0, "ROCK TOPS shapes the mountain (" .. lowered .. ")")
+  T.check(raised == 0, "ROCK TOPS never raises anything")
+  T.check(otherChanged == 0, "ROCK TOPS touches only rock")
+  T.check(deepest <= 12, "a rock top sinks at most 12 px (" .. deepest .. ")")
+  T.check(off.rockShaped == nil, "without ROCK TOPS nothing is shaped")
+  local same = true
+  for k, h in pairs(off.H) do if (off.R[k] == nil) and on.H[k] ~= h then same = false break end end
+  T.check(same, "the ground and the water keep their heights")
+  local inTown = HF.build({ cell = cellK, color = colorK }, 0, -2, W, Hc + 2,
+    { round = "soft", lumps = false, rock = true, roofs = true, rocks = "art", rockDepth = "deep", town = true })
+  T.check((inTown.rockShaped or 0) == 0, "no ROCK TOPS in a town (its beige walls are not cliffs)")
+  local function cellD(cx, cy)
+    if cx == 5 and cy == 9 then return { kind = "door", mid = 4, warpDoor = true, behKnown = true } end
+    return cellK(cx, cy)
+  end
+  local withDoor = HF.build({ cell = cellD, color = colorK }, 0, -2, W, Hc + 2,
+    { round = "soft", lumps = false, rock = true, roofs = true, rocks = "art", rockDepth = "deep" })
+  local nearSame = true
+  for k, h in pairs(off.H) do
+    local vx, vy = (k - 1) % off.vcols, math.floor((k - 1) / off.vcols)
+    local cx, cy = math.floor(vx / 4), math.floor(vy / 4) - 2
+    if cx >= 2 and cx <= 8 and cy >= 3 and cy <= 8 and withDoor.H[k] ~= h and not (cx == 5 and cy == 9) then nearSame = false end
+  end
+  T.check(nearSame, "a rock with a house door below it is left as it is")
+  local function cellW(cx, cy)
+    if cy == 9 then return { kind = "water", mid = 9 } end
+    return cellK(cx, cy)
+  end
+  local wOff = HF.build({ cell = cellW, color = colorK }, 0, -2, W, Hc + 2,
+    { round = "soft", lumps = false, rock = true, roofs = true })
+  local wOn = HF.build({ cell = cellW, color = colorK }, 0, -2, W, Hc + 2,
+    { round = "soft", lumps = false, rock = true, roofs = true, rocks = "art", rockDepth = "deep" })
+  local shoreSame = true
+  for cx = 2, 9 do
+    for j = 0, 3 do
+      for i = 0, 3 do
+        local k = ((8 + 2) * 4 + j) * wOff.vcols + cx * 4 + i + 1
+        if wOn.H[k] ~= wOff.H[k] and (wOff.H[k] or 0) > 8 then shoreSame = false end
+      end
+    end
+  end
+  T.check(shoreSame and (wOn.rockShaped or 0) > 0, "rock at the water's edge is left as it is")
+  local tOff, tOn = buildK(nil, "art"), buildK("art", "art")
+  local fsame = true
+  for k, f in pairs(tOff.FL) do if tOn.FL[k] ~= f then fsame = false break end end
+  for k, f in pairs(tOn.FL) do if tOff.FL[k] ~= f then fsame = false break end end
+  T.check(fsame, "ROCK TOPS leaves RAISED GROUND's floors as they were")
+end
+
+do
+  -- RAISED GROUND: fields one above the other by ledges alone, fenced in
+  -- (FireRed's Route 5): at most one lip, never a staircase of them
+  local W, Hc = 6, 16
+  local function cellL(cx, cy)
+    if cx == 0 or cx == W - 1 then return { kind = "solid", mid = 7 } end -- fences
+    if cy == 3 or cy == 6 or cy == 9 or cy == 12 then return { kind = "ledge", coll = 0xA3, mid = 5 } end
+    return { kind = "ground", mid = 1 }
+  end
+  local g = HF.build({ cell = cellL, color = function() return 0.5, 0.75, 0.4 end }, 0, 0, W, Hc,
+    { lumps = false, rock = true, terrain = "art" })
+  local top = 0
+  for cy = 0, Hc - 1 do
+    local k = (cy * 4 + 2) * g.vcols + 2 * 4 + 2 + 1
+    if g.FL[k] and g.FL[k] > top and cellL(2, cy).kind == "ground" then top = g.FL[k] end
+  end
+  T.check(top <= 8, "ledges never stack (highest field " .. top .. " px)")
+end
+
+do
+  -- Windows: found in a building's own art -- small blue panes in the wall
+  -- light, a long blue stripe (siding) and a blue sign-band do not; a
+  -- building with no door has none; nothing else changes
+  local W, Hc = 14, 12
+  local function cellW(cx, cy)
+    if cx >= 2 and cx <= 11 and cy >= 2 and cy <= 6 then
+      if cy == 6 and cx == 6 then return { kind = "door", mid = 4, warpDoor = true, behKnown = true } end
+      return { kind = "solid", mid = 3 }
+    end
+    return { kind = "ground", mid = 1 }
+  end
+  local function colorW(wx, wy)
+    local cx, cy = math.floor(wx / 16), math.floor(wy / 16)
+    if cx >= 2 and cx <= 11 and cy >= 2 and cy <= 6 then
+      local lx, ly = wx - 32, wy - 32
+      -- two panes, 8x8 px, framed dark, at (16,24) and (104,24)
+      for _, px in ipairs({ 16, 104 }) do
+        if lx >= px - 2 and lx < px + 10 and ly >= 22 and ly < 34 then
+          if lx >= px and lx < px + 8 and ly >= 24 and ly < 32 then return 0.35, 0.6, 0.9 end
+          return 0.2, 0.22, 0.3
+        end
+      end
+      -- a long blue stripe down the facade (siding), 4 px wide
+      if lx >= 60 and lx < 64 then return 0.35, 0.6, 0.9 end
+      return 0.86, 0.82, 0.70 -- a cream wall
+    end
+    return 0.45, 0.75, 0.40
+  end
+  local g = HF.build({ cell = cellW, color = colorW }, 0, -2, W, Hc + 2,
+    { round = "soft", lumps = false, rock = true, roofs = false, town = true })
+  T.check((g.windows or 0) == 2, "two windows found in the art (" .. tostring(g.windows) .. ")")
+  local stripe = false
+  for k in pairs(g.winL or {}) do
+    local vx = (k - 1) % g.vcols
+    if vx * 4 >= 32 + 60 and vx * 4 < 32 + 64 then stripe = true end
+  end
+  T.check(not stripe, "a long blue stripe is no window")
+  local off = HF.build({ cell = cellW, color = colorW }, 0, -2, W, Hc + 2,
+    { round = "soft", lumps = false, rock = true, roofs = false, town = true, windows = false })
+  local same = true
+  for k, h in pairs(off.H) do if g.H[k] ~= h then same = false break end end
+  T.check(same and (off.windows or 0) == 0, "windows change no shape")
+  local function cellN(cx, cy) local c = cellW(cx, cy) if c.kind == "door" then return { kind = "solid", mid = 3 } end return c end
+  local nod = HF.build({ cell = cellN, color = colorW }, 0, -2, W, Hc + 2,
+    { round = "soft", lumps = false, rock = true, roofs = false, town = true })
+  T.check((nod.windows or 0) == 0, "no door, no windows (a wall, a sign)")
 end
 
 T.finish("voxel_world_gen3")

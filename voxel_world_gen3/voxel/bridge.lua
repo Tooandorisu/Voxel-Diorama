@@ -151,6 +151,8 @@ local function reliefKey(q)
   -- (TREE STYLE: a change rebuilds, like the relief)
   local ts = settings.treeStyle
   local r = tostring(roundOf(q)) .. ((ts == "rounded" and "/art") or (ts == "roundedplus" and "/art+") or "")
+    .. (settings.raisedGround == true and "/rg" or "")
+    .. (settings.rockTops == true and "/rt" or "")
   if not settings.lumps then return "off:" .. r end
   return q.blk .. ":" .. q.step .. ":" .. r
 end
@@ -1039,8 +1041,8 @@ local function needsRebuild(provider, world, x0, y0, x1, y1)
   if b.sun ~= settings.sunShadows then return true end
   if b.roofs ~= settings.roofs then return true end
   if b.falls ~= (settings.falls ~= false) then return true end
-  -- the sun moved on (every half hour of the day): bake its light anew
-  if settings.sunShadows and b.sunKey ~= sunKeyFor(provider.def) then return true end
+  -- (the sun moving on, every half hour of the day, is no rebuild: the
+  -- shapes are the same, only their light is baked anew -- relight)
   if x0 < b.x0 or y0 < b.y0 or x1 > b.x1 or y1 > b.y1 then return true end
   return false
 end
@@ -1053,6 +1055,39 @@ end
 -- uploaded and swapped in.
 local JOB_BUDGET = 0.003 -- seconds of rebuild work per frame
 local JOB_BUDGET_GAP = 0.009 -- while part of the view has no mesh yet
+-- The light of a grid for the hour (sun and shadows, ambient occlusion,
+-- the night's lamps) as the image the terrain shader reads: built with the
+-- mesh, and again on its own when only the hour moved on (relight below).
+-- Returns the image (nil if it could not be made) and the hour's key.
+local function bakeLight(grid, def, tick)
+  local key = sunKeyFor(def)
+  local s = (key ~= "noon") and DayNight.sunOf(key) or nil
+  local indoor = not isOutdoor(def)
+  state.phase = 'light'
+  Lighting.bake(grid, HF.VOXEL, { tick = tick,
+    -- no sun at night: ambient occlusion only.  Indoors the room's own
+    -- light, high up toward the back wall: furniture throws a soft
+    -- shadow forward onto the floor, the back wall a band along its foot.
+    sun = indoor or key ~= "night",
+    sunX = indoor and 0.1 or (s and s.sunX), sunY = indoor and 0.38 or (s and s.sunY),
+    room = indoor and grid.room ~= nil })
+  state.phase = 'lightimg'
+  -- (a whole map is kept without its shores: made again for the bake)
+  local tempShore = false
+  if grid.hasWater and not grid.shore then HF.shore(grid, tick); tempShore = true end
+  local okL, img = pcall(function()
+    local d = Lighting.imageData(grid, tick)
+    local im = love.graphics.newImage(d)
+    d:release()
+    im:setFilter("linear", "linear")
+    im:setWrap("clamp", "clamp")
+    return im
+  end)
+  if tempShore then grid.shore = nil end
+  if tick then tick() end
+  return okL and img or nil, key
+end
+
 local rebuildInner
 
 local function rebuild(...)
@@ -1075,12 +1110,38 @@ local function startJobIn(slot, ...)
   end
   job.co = coroutine.create(function() rebuildInner(tick, unpack(args)) end)
   state[slot] = job
+  state.jobsStarted = state.jobsStarted or {}
+  state.jobsStarted[slot] = (state.jobsStarted[slot] or 0) + 1
 end
 local function startJob(...) return startJobIn("job", ...) end
+
+-- Adaptive slices: the background builds share what is left of a frame
+-- (FRAME_TARGET) once the drawing is paid for (state.avgMs, measured) and
+-- whatever background work this frame has had already.  Each kind keeps a
+-- floor so it always moves on, and never gets more than its old fixed
+-- budget.  A slice that ran long (one step of the build that cannot be cut,
+-- or the collector) lets the next frame go by without that build, so two
+-- long frames never come back to back.
+local FRAME_TARGET = 0.014
+local OVERRUN = 0.006
+-- (the background builds' helpers, in one table: the frame's update
+-- function is at Lua's limit of 60 upvalues)
+local BG = {}
+local function slice(lo, hi)
+  local used = (state.tJobFrame or 0) / 1000
+  local room = FRAME_TARGET - (state.avgMs or 0) / 1000 - used
+  if room < lo then return lo end
+  if room > hi then return hi end
+  return room
+end
+
+BG.slice = slice
 
 local function stepJobIn(slot, budget)
   local job = state[slot]
   if not job then return end
+  -- (the frame after a long slice: given back whole)
+  if job.rest then job.rest = nil; state.jobRests = (state.jobRests or 0) + 1 return end
   local t0 = love.timer.getTime()
   job.deadline = t0 + budget
   local ph0 = state.phase
@@ -1095,6 +1156,9 @@ local function stepJobIn(slot, budget)
     job.worstIn = (ph0 == nil or ph0 == ph1) and ph1 or (tostring(ph0) .. ">" .. ph1)
   end
   state.tJobFrame = (state.tJobFrame or 0) + spent * 1000
+  if spent > budget + OVERRUN and not (slot == "job" and state.gap) and not (state.pre and state.pre.shown) then
+    job.rest = true
+  end
   if not ok then
     state[slot] = nil
     error(err, 0)
@@ -1120,7 +1184,66 @@ end
 local function stepJob()
   -- part of the view is uncovered (just crossed into a new area): finish
   -- faster; otherwise trickle along at the normal budget
-  return stepJobIn("job", state.gap and JOB_BUDGET_GAP or JOB_BUDGET)
+  if state.gap then return stepJobIn("job", slice(JOB_BUDGET, JOB_BUDGET_GAP)) end
+  return stepJobIn("job", slice(0.0015, JOB_BUDGET))
+end
+
+-- ------- relight: the sun moved on (every half hour of the day), the
+-- shapes did not.  Only the light is baked anew, in the background, for
+-- the grid in use (the view's, or the whole map's) and swapped in when
+-- done -- it was a whole rebuild of the map and of every one kept around
+-- it, seconds of background work on a phone for the same shapes.
+function BG.startRelight(provider, key)
+  local grid, def = state.grid, provider.def
+  local job = { grid = grid, key = key, def = def }
+  local function tick()
+    if love.timer.getTime() > job.deadline then coroutine.yield() end
+  end
+  job.co = coroutine.create(function()
+    job.img, job.got = bakeLight(grid, def, tick)
+  end)
+  state.ljob = job
+end
+
+function BG.stepRelight(budget)
+  local job = state.ljob
+  if not job then return end
+  local t0 = love.timer.getTime()
+  job.deadline = t0 + budget
+  local ok, err = coroutine.resume(job.co)
+  state.tJobFrame = (state.tJobFrame or 0) + (love.timer.getTime() - t0) * 1000
+  if not ok then
+    state.ljob = nil
+    state.relightErr = tostring(err)
+    -- (not tried again and again: kept with its old light)
+    if state.built and state.grid == job.grid then state.built.sunKey = job.key end
+    return
+  end
+  if coroutine.status(job.co) ~= "dead" then return end
+  state.ljob = nil
+  local g = job.grid
+  -- (the view moved on meanwhile: its new mesh has its own light)
+  if state.grid ~= g or not state.built then
+    if job.img then pcall(job.img.release, job.img) end
+    return
+  end
+  if not job.img then state.built.sunKey = job.key return end
+  local e = state.built.wholeOf
+  local w, h = g.vcols * HF.VOXEL, g.vrows * HF.VOXEL
+  if e and e.grid == g then
+    local old = e.light
+    e.light = job.img
+    e.built.sunKey = job.got
+    -- (kept as it was built: without the light's own arrays)
+    g.sun, g.ao, g.glow = nil, nil, nil
+    Scene.setLight(job.img, g.px, g.py, w, h, true)
+    if old and old ~= job.img then pcall(old.release, old) end
+  else
+    -- (the view's own light is not kept: setLight releases it)
+    Scene.setLight(job.img, g.px, g.py, w, h)
+  end
+  state.built.sunKey = job.got
+  state.relights = (state.relights or 0) + 1
 end
 
 -- ------- whole maps, built ahead
@@ -1149,6 +1272,7 @@ local NEAR_FRAME_OK = 1 / 50 -- average frame time below this...
 local NEAR_FRAME_MAX = 1 / 30-- ...and no frame above this in the last second
 local NEAR_SETTLE = 3      -- seconds after arriving on a map before starting
 local WHOLE_BUDGET = 0.003
+BG.WHOLE, BG.NEAR = WHOLE_BUDGET, NEAR_BUDGET
 
 -- The verdict on the tilesets' art, by what the screen showed.  A tileset
 -- checked on its own (200 samples) passes or fails by itself; one not
@@ -1195,8 +1319,11 @@ local function wholeKey(provider)
     -- (not the relief detail: AUTO stepping down a tier threw away a whole
     -- map nearly built; it keeps the detail it was built with)
     tostring(settings.lumps), tostring(settings.sunShadows), tostring(settings.roofs),
-    tostring(settings.falls ~= false), settings.sunShadows and sunKeyFor(provider.def) or "-",
-    tostring(settings.treeStyle or "classic") }, "|")
+    -- (not the hour: when only the sun moved on, the light is baked anew
+    -- for the shapes already built -- relight below)
+    tostring(settings.falls ~= false),
+    tostring(settings.treeStyle or "classic"), tostring(settings.raisedGround == true),
+    tostring(settings.rockTops == true) }, "|")
 end
 
 local function mapSize(def)
@@ -1521,10 +1648,23 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       end
       state.alignNote = ("%d/%d"):format(matched, tested)
       if tested >= 8 and matched * 2 < tested then
-        state.misalignedT = love.timer.getTime()
-        if data then data:release() end
-        if whole then state.wholeTried = nil end -- (asked again once it matches)
-        return false
+        -- Right after a map switch this is the seam's lag: wait for the
+        -- picture.  Long after it, it is the picture itself that differs --
+        -- Mt. Pyre's summit lies in fog, and nothing it shows matches the
+        -- art learned in clear weather: then build without the picture
+        -- (from the learned art), and learn nothing from it.  (Waited for,
+        -- the view was never rebuilt there and "seam: waiting for the
+        -- picture" stood for good.)
+        local sinceSwitch = love.timer.getTime() - (state.mapSwitchT or 0)
+        if sinceSwitch < 3 then
+          state.misalignedT = love.timer.getTime()
+          if data then data:release() end
+          if whole then state.wholeTried = nil end -- (asked again once it matches)
+          return false
+        end
+        state.pictureOff = (state.pictureOff or 0) + 1
+        if color == shot then color = nil end
+        shot = nil
       end
     end
     if shot and tick then state.learnedNew = learnFrom(shot, cellOf, gx, gy, W, H, tick) end
@@ -1545,7 +1685,9 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   local q = preset()
   local MapW = Engine.get("src.core.game3.map")
   state.phase = 'hf'
-  local grid = HF.build({ cell = Bridge.cachedCells(provider, MapW and MapW.world), color = color, shape = provider.shape },
+  -- (mapId: the windows' Pokemon Tower rule goes by the map)
+  local grid = HF.build({ cell = Bridge.cachedCells(provider, MapW and MapW.world), color = color, shape = provider.shape,
+      mapId = provider.mapId },
     x0, y0, x1 - x0 + 1, y1 - y0 + 1,
     { heightScale = settings.heightScale, lumps = settings.lumps, tick = tick,
       -- street lamps found before stay lamps (the quarter-size art a thin
@@ -1561,6 +1703,14 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
       -- -- where one crown meets the next -- in one step (heightfield.lua)
       crownGap = settings.treeStyle == "roundedplus" and "shade" or nil,
       crownShade = settings.treeStyle == "roundedplus" and "two" or nil,
+      -- RAISED GROUND (test): plateaus stand on the cliffs the art draws
+      -- (heightfield.lua, opts.terrain "art"); outdoors only
+      terrain = (settings.raisedGround == true and isOutdoor(provider.def)) and "art" or nil,
+      -- ROCK TOPS (test): mountain tops round off toward their edges and
+      -- dip along the seams their own art draws between boulders; heights
+      -- only, outdoors only (heightfield.lua, opts.rocks "art")
+      rocks = (settings.rockTops == true and isOutdoor(provider.def)) and "art" or nil,
+      rockDepth = "deep",
       roofs = settings.roofs and isOutdoor(provider.def),
       -- RSE draws its roofs ridged east-west (gable trim down the sides)
       ridge = (function() local f = Cells.family and Cells.family() return (f and f ~= "frlg") and "ew" or "ns" end)(),
@@ -1607,29 +1757,9 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
   local lightImage
   state.bakedSunKey = nil
   if settings.sunShadows then
-    local key = sunKeyFor(provider.def)
-    local s = (key ~= "noon") and DayNight.sunOf(key) or nil
-    local indoor = not isOutdoor(provider.def)
-    state.phase = 'light'
-    Lighting.bake(grid, HF.VOXEL, { tick = tick,
-      -- no sun at night: ambient occlusion only.  Indoors the room's own
-      -- light, high up toward the back wall: furniture throws a soft
-      -- shadow forward onto the floor, the back wall a band along its foot.
-      sun = indoor or key ~= "night",
-      sunX = indoor and 0.1 or (s and s.sunX), sunY = indoor and 0.38 or (s and s.sunY),
-      room = indoor and grid.room ~= nil })
+    local key
+    lightImage, key = bakeLight(grid, provider.def, tick)
     state.bakedSunKey = key
-    state.phase = 'lightimg'
-    local okL, img = pcall(function()
-      local d = Lighting.imageData(grid, tick)
-      local im = love.graphics.newImage(d)
-      d:release()
-      im:setFilter("linear", "linear")
-      im:setWrap("clamp", "clamp")
-      return im
-    end)
-    if okL then lightImage = img end
-    if tick then tick() end
   end
   if whole then
     state.phase = 'keep'
@@ -1637,7 +1767,8 @@ rebuildInner = function(tick, provider, p, x0, y0, x1, y1, whole)
     -- (where characters stand, the roofs for the chimneys, the waterfalls,
     -- the lamps...) -- the texture rows, shades and flags of every voxel
     -- of three whole maps were tens of megabytes
-    for _, k in ipairs({ "K", "C", "L", "R", "F", "B", "U", "CAP", "shore", "V" }) do grid[k] = nil end
+    -- (and the light's own arrays, in the image now)
+    for _, k in ipairs({ "K", "C", "L", "R", "F", "B", "U", "CAP", "shore", "V", "sun", "ao", "glow" }) do grid[k] = nil end
     local Map = Engine.get("src.core.game3.map")
     -- (the map may have changed while this was built: keep it for later)
     local e = { grid = grid, pieces = pieces, light = lightImage, verts = nv, tris = ni / 3,
@@ -2159,6 +2290,17 @@ function Bridge.renderPending(R)
   end
   state.gap = state.job ~= nil and needsRebuild(provider, world, cx0, cy0, cx1, cy1)
   if state.job then stepJob() end
+  -- the hour moved on: the light baked anew for the shapes in use (after
+  -- the view's own rebuild, which bakes the hour's light itself)
+  if settings.sunShadows and state.built and state.grid and not hard then
+    local want = sunKeyFor(provider.def)
+    local lj = state.ljob
+    if lj and (lj.grid ~= state.grid or lj.key ~= want) then state.ljob = nil; lj = nil end
+    if not lj and state.built.sunKey ~= want and not state.job then BG.startRelight(provider, want) end
+    if state.ljob and not state.job then BG.stepRelight(BG.slice(0.001, BG.WHOLE)) end
+  else
+    state.ljob = nil
+  end
   -- frame times, for pausing the neighbours
   -- (not behind the pre-build's screen: long frames there on purpose)
   if not state.pre then
@@ -2180,9 +2322,9 @@ function Bridge.renderPending(R)
       stepJobIn("wjob", PRE_BUDGET)
       state.nearPaused = nil
     elseif not state.wjob.neighbour then
-      stepJobIn("wjob", WHOLE_BUDGET)
+      stepJobIn("wjob", BG.slice(0.001, BG.WHOLE))
     elseif frameOk and not state.job then
-      stepJobIn("wjob", NEAR_BUDGET)
+      stepJobIn("wjob", BG.slice(0.0005, BG.NEAR))
       state.nearPaused = nil
     else
       state.nearPaused = state.job and "view rebuilding" or ("frame %.0f ms"):format((state.frameAvg or 0) * 1000)
@@ -2239,7 +2381,10 @@ function Bridge.renderPending(R)
     if settings.prebuild == true and settings.wholeMaps ~= false and isOutdoor(provider.def)
         and (not b or b.mapId ~= provider.mapId) then
       local e = state.wholeCache[provider.mapId]
-      if not (e and e.key == wkey) then
+      -- (not again while one for this map is under way: a one-off build
+      -- the picture held back is retried every frame, and restarted the
+      -- pre-build with it -- "pre: warp 0/1 0.0 s" over and over)
+      if not (e and e.key == wkey) and not (state.pre and tostring(state.pre.mapId) == tostring(provider.mapId)) then
         endPre("warped")
         startPre(provider, world)
       end
@@ -2666,6 +2811,8 @@ function Bridge.renderPending(R)
     tint = tint,
     desat = (dayNight(provider.def) or {}).desat,
     night = settings.nightlights ~= false and Bridge.nightLevel(dayNight(provider.def)) or 0,
+    -- LIVED-IN WINDOWS: the windows found lit each their own way
+    windowLife = settings.windowLife == true and 1 or 0,
     parters = state.parters,
     warmFlash = settings.caveFx ~= false,
     -- the wind eases to the weather's over a few seconds
@@ -3002,6 +3149,17 @@ function Bridge.install()
           text = text .. ("  trees %s %d"):format((settings.treeStyle == "rounded" and "ROUNDED")
             or (settings.treeStyle == "roundedplus" and "ROUNDED+") or "CLASSIC",
             g and g.crownVoxels or 0)
+          -- RAISED GROUND: fields found, how many stand raised, stairs
+          if settings.raisedGround == true then
+            text = text .. ("  ground RAISED %d/%d st%d"):format(g and g.fieldLevels or 0, g and g.fields or 0, g and g.stairs or 0)
+          end
+          if settings.rockTops == true then
+            text = text .. ("  rock TOPS %d"):format(g and g.rockShaped or 0)
+          end
+          -- the sun's light baked anew without a rebuild; frames a
+          -- background build sat out after a long slice
+          text = text .. ("  relit %d%s  rest %d"):format(state.relights or 0, state.ljob and "*" or "",
+            state.jobRests or 0)
           text = text .. "  blink " .. tostring(Scene.blinkFrames or 0)
           do
             local cs = Critters._state

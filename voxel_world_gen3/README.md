@@ -30,6 +30,7 @@ voxels.
 | BREATH | OFF / SUBTLE / NORMAL | characters gently breathe, each on their own clock (after last_swagger's Voxel Characters) |
 | BLINK | on / off | characters blink every few seconds; the eyes are found by their shape, so the odd sprite may not blink or may blink a stray pixel |
 | NIGHT LIGHTS | on / off | at night windows glow, street lamps and doorways cast pools of warm light (needs DAY/NIGHT and sun shadows on) |
+| LIVED-IN WINDOWS | off / on | (needs NIGHT LIGHTS) each lit window its own: some dark, some brighter or dimmer, the odd one switching; Pokemon Tower lights only its lobby |
 | REFLECTIONS | on / off | water mirrors trees, houses and characters beside it (a second, half-size render pass, only when water is in view) |
 | SWAYING TREES | on / off | trees, shrubs and tall grass move in the wind, harder in rain and storms |
 | FIREFLIES & BIRDS | on / off | fireflies over grass and woods at night, small flocks of birds flying up out of trees by day |
@@ -43,6 +44,8 @@ voxels.
 | BUILD NEIGHBOURS | on / off | also builds the maps next to the current one in the background, while frames have time to spare, so crossing into one is seamless |
 | TREE STYLE | rounded / rounded+ / classic | ROUNDED shapes each tree's crown from its own art; ROUNDED+ also lowers the shaded green between crowns; CLASSIC is the older look (rows of ridges) |
 | PRE-BUILD AT START | off / on | on arriving somewhere new (Continue, New Game, Fly, Teleport, a warp out of doors), builds the map (and at the start its neighbours) behind a short loading screen; B skips |
+| RAISED GROUND | off / on | (test) plateaus stand on the cliffs the art draws, stairs climb between them |
+| ROCK TOPS | off / on | (test) mountain tops round off toward their edges and dip along the seams their art draws between boulders |
 | CAMERA TURN | LEFT 30 / LEFT 15 / STRAIGHT / RIGHT 15 / RIGHT 30 | look at the diorama from an angle, to see behind houses; key 7 cycles it |
 | 3D WEATHER | on / off | rain, snow and volcanic ash fall through the 3D scene, behind and in front of buildings, instead of being painted over the map; rain darkens the light, thunderstorms flash |
 | DAY/NIGHT | GAME CLOCK / DEVICE CLOCK / OFF | outdoors, the light follows the time of day: morning and evening sun from the side with long shadows, warm sunsets, blue nights with no shadows. GAME CLOCK uses the clock you set in Ruby/Sapphire/Emerald (FireRed/LeafGreen have none and use the device clock) |

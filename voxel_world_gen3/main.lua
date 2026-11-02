@@ -75,6 +75,7 @@ return function(mod)
       choices = { { "OFF", "off" }, { "SUBTLE", "subtle" }, { "NORMAL", "normal" } } },
     { key = "blink", label = "BLINK", type = "toggle", default = true },
     { key = "nightlights", label = "NIGHT LIGHTS", type = "toggle", default = true },
+    { key = "windowLife", label = "LIVED-IN WINDOWS", type = "toggle", default = false },
     { key = "reflect", label = "REFLECTIONS", type = "toggle", default = true },
     { key = "sway", label = "SWAYING TREES", type = "toggle", default = true },
     { key = "critters", label = "FIREFLIES & BIRDS", type = "toggle", default = true },
@@ -87,6 +88,8 @@ return function(mod)
     { key = "wholeMaps", label = "BUILD AHEAD", type = "toggle", default = true },
     { key = "nearMaps", label = "BUILD NEIGHBOURS", type = "toggle", default = true },
     { key = "prebuild", label = "PRE-BUILD AT START", type = "toggle", default = false },
+    { key = "raisedGround", label = "RAISED GROUND", type = "toggle", default = false },
+    { key = "rockTops", label = "ROCK TOPS", type = "toggle", default = false },
     { key = "shadows", label = "SHADOWS", type = "toggle", default = true },
     { key = "xray", label = "SEE-THROUGH", type = "toggle", default = true },
     { key = "rate", label = "3D RATE", type = "choice", default = "auto",
@@ -133,6 +136,9 @@ return function(mod)
       wholeMaps = mod.options:get("wholeMaps") ~= false,
       nearMaps = mod.options:get("nearMaps") ~= false,
       prebuild = mod.options:get("prebuild") == true,
+      raisedGround = mod.options:get("raisedGround") == true,
+      rockTops = mod.options:get("rockTops") == true,
+      windowLife = mod.options:get("windowLife") == true,
       blur = mod.options:get("blur") ~= false,
       roundTrees = mod.options:get("roundTrees") ~= false,
       treeStyle = mod.options:get("treeStyle") or "rounded",
@@ -225,7 +231,7 @@ return function(mod)
     return next(game, ev)
   end)
 
-  mod.exports.version = "1.32.2"
+  mod.exports.version = "1.33.0"
   mod.exports.level = function() return Bridge.level() end
   -- read-only timings for tools/tests: { capture, render, mesh, avg } in ms
   mod.exports.stats = function()
@@ -236,7 +242,8 @@ return function(mod)
              verts = st.meshVerts, tris = st.meshTris,
              quality = Bridge.preset().name, half = st.halfNow == true,
              pre = st.pre and { kind = st.pre.kind, done = st.pre.done, total = st.pre.total } or nil,
-             preLast = st.preLast }
+             preLast = st.preLast, relights = st.relights or 0, relighting = st.ljob ~= nil,
+             rests = st.jobRests or 0, started = st.jobsStarted, phase = st.phase, jobWork = st.job and st.job.work, jobFrames = st.job and st.job.frames }
   end
   mod.exports.setLevel = function(level)
     liveLevel = Bridge.setLevel(level)
