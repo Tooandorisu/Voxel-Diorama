@@ -1,5 +1,98 @@
 # Changelog
 
+## 1.33.0
+
+- Towns at night: windows, redone.  The old glow lit every light-blue
+  pixel on a building's walls -- the Lilycove Department Store's siding
+  came out as gold stripes top to bottom, and the trim of Pokemon Centers,
+  Marts and Gyms lit up while real windows above the ground floor stayed
+  dark.
+  - Windows are now found in each building's own art, once, when it is
+    built (no lists of tiles or places): a small pane of glass -- bluish,
+    or a dark pane -- set off from the wall, enclosed by the building all
+    round.  Long siding stripes, outlines, a door's glass and the glass
+    over it, fences, tiled roofs, emblems (a Mart's or a Pokemon Center's
+    sign), lone specks of trim (Devon Corporation's facade, the corners of
+    roofs) and the frame of a band under the eaves (some of Saffron's
+    houses) are no windows.  Upper floors drawn on a tall building's top
+    faces count the same as its walls.
+  - Only the glass glows, not its frame, in a soft warm light over the
+    original pixels.  Entrance light at doors is as before.
+  - Pokemon Tower: only its lobby -- the lowest row of windows -- is lit;
+    every floor above stays dark.
+  - Nothing is searched while you play: the shader reads one more texel.
+    About 5-10% more work in a town's background build, in its slices.
+  - (Needs SUN SHADOWS, like the rest of the night light: the windows'
+    marks travel in its light texture.)
+- New option LIVED-IN WINDOWS (off by default, needs NIGHT LIGHTS): each
+  window its own -- about one in four dark, the rest a little brighter or
+  dimmer, a few a cooler lamp, and now and then one switches on or off.
+  The pattern belongs to the window's place on the map, so it is the same
+  every time you come back.  Pokemon Tower keeps at least two of its lobby
+  windows lit; its upper floors stay dark.  The choice for each window is
+  made on the CPU when its light is baked, so phones' half-precision GPUs
+  show the same pattern as a desktop.
+- New option RAISED GROUND (off by default, a test).  Plateaus stand on
+  the cliffs the art draws: ground you can walk across without crossing a
+  cliff, a ledge or stairs is one field; a field behind a cliff stands as
+  high as the cliff, one behind a ledge a lip higher.  Ground reachable
+  around a cliff stays level with it, so only real plateaus rise.  Ruby,
+  Sapphire and Emerald's stored levels also keep fields apart.  The sea's
+  field is the ground level; water is never raised.
+  - Stairs climb between the fields they join, step by step; whoever walks
+    on them rises with them.  Ledges are a lip, not a slab, and never
+    stack: a field is at most one lip above the ground it is reached from
+    by ledges alone (FireRed's Route 5 is one level, as in the game).
+  - Houses, trees and signs on a plateau stand on it, their art read as
+    on flat ground.  Characters, shadows, footprints and night lights
+    follow the raised ground.
+  - Movement, collision and ledges are the game's own, unchanged.
+  - FireRed/LeafGreen: most routes are one level in the game, and stay so.
+- New option ROCK TOPS (off by default, a test): mountains and cliffs
+  outdoors lose their flat block tops.  A top rounds off toward every edge
+  where it stands above the ground around it, and dips a little along the
+  dark seams the art draws between its boulders, so each painted boulder
+  becomes a low mound.  The original pixels are kept as they are (no
+  smoothing, no new textures); heights move in 2 px steps, at most 6 px
+  between neighbouring blocks.  Only how high the rock looks changes:
+  collision, ledges and RAISED GROUND are untouched.  Left as they are:
+  towns, buildings on routes (anything with a roof or a house door below
+  it), trees and bushes standing on cliffs, and rocks in or at the edge of
+  the water.  About +0 to +25% vertices on a map with mountains.
+- Background builds of big maps (Route 111, Route 119, the Safari Zone)
+  are gentler on the frame.  Nothing they build has changed: the shapes,
+  the meshes and the light come out exactly as before (checked map by map,
+  with RAISED GROUND, ROCK TOPS and ROUNDED+ on and off).
+  - Arrays over every voxel of a whole map are made at their full size up
+    front, and the long loops (the new RAISED GROUND and ROUNDED crown
+    passes among them) give the frame back.  Measured on a desktop, the
+    longest steps went from 6-9 ms to about 3-4 ms, and those over 4 ms
+    from 4-10 per map to almost none.
+  - Far less garbage: the mesher packs its vertices in blocks instead of a
+    table for each of them, and the neighbour lists in the hot loops are
+    made once.
+  - The slices adapt to the frame: the builds share what is left of about
+    14 ms once the drawing is paid for, never more than their old fixed
+    budgets, and a slice that ran long lets the next frame go by without
+    that build, so two long frames do not come back to back.
+  - When the sun moves on (every half hour of the day) only the light is
+    baked anew, in the background, for the shapes already built -- it was
+    a full rebuild of the map and of the maps kept around it.
+  - Whole maps kept for coming back no longer keep their light's working
+    arrays.
+- Fixed (Ruby/Sapphire/Emerald): on a map in fog (Mt. Pyre's summit) the
+  view was never rebuilt -- "(seam: waiting for the picture -- picture
+  misaligned)" for good.  Past the first seconds on a map the view is
+  built from the learned art instead, and nothing is learned from the
+  fogged picture.
+- Fixed: PRE-BUILD AT START restarted every frame while such a build was
+  held back ("pre: warp 0/1 0.0 s"), and with it the frame and hitch
+  numbers on PERF STATS stood at 0.
+- PERF STATS: "ground RAISED n/m stN" (fields raised of all, stairs),
+  "rock TOPS n", "relit n" (light baked anew without a rebuild; "*" while
+  one is on its way) and "rest n" (frames a background build sat out after
+  a long slice).
+
 ## 1.32.2
 
 - Fixed: fireflies (and birds) swarming over the black around a map at

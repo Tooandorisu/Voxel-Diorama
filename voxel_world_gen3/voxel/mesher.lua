@@ -25,6 +25,47 @@ local FOOT_DARK = 0.78 -- side faces darken toward their base: cheap AO
 -- mountains); an overlap of coplanar, identically textured faces can't.
 local E = 0.08
 
+-- packed vertices (see Mesher.build)
+local BLOCK = 2048
+Mesher.BLOCK = BLOCK
+local tnew = (function()
+  local ok, f = pcall(require, "table.new")
+  if ok and type(f) == "function" then return f end
+  return function() return {} end
+end)()
+-- vertex i of a packed list as a table { x, y, z, u, v, ox, oy, r, g, b, a }
+function Mesher.vertex(verts, i, out)
+  local blocks = rawget(verts, "packed")
+  if not blocks then return verts[i] end
+  local blk = blocks[floor((i - 1) / BLOCK) + 1]
+  if not blk then return nil end
+  local o = ((i - 1) % BLOCK) * 11
+  if blk[o + 1] == nil then return nil end
+  out = out or {}
+  for j = 1, 11 do out[j] = blk[o + j] end
+  return out
+end
+-- (verts[i] reads like the old lists of tables: tests, tools)
+local PACKED = { __index = function(t, i)
+  if type(i) == "number" then return Mesher.vertex(t, i) end
+  return nil
+end }
+Mesher.PACKED = PACKED
+-- vertices first..last as plain tables, into `part` (reused: its tables
+-- are filled again, not made anew), for Mesh:setVertices
+function Mesher.unpackRange(verts, first, last, part)
+  part = part or {}
+  local n = 0
+  for i = first, last do
+    n = n + 1
+    local t = part[n]
+    if not t then t = {}; part[n] = t end
+    Mesher.vertex(verts, i, t)
+  end
+  for j = #part, n + 1, -1 do part[j] = nil end
+  return part
+end
+
 -- region (optional): { vx0, vy0, vx1, vy1 } voxels (the end exclusive) --
 -- one piece of a big grid (bridge.lua builds a whole map, and meshes it in
 -- pieces so only the ones in view are drawn).  A roof or a waterfall goes
@@ -54,8 +95,23 @@ function Mesher.build(grid, VOXEL, tick, region)
     return x >= RX0 and x < RX1 and y >= RY0 and y < RY1
   end
 
-  local verts, idx = {}, {}
+  -- Vertices packed 11 numbers each into blocks of BLOCK vertices (one
+  -- table per block, not one per vertex: a whole map's half a million
+  -- little tables were the collector's work for seconds after, landing in
+  -- the frames -- the 30 ms "mesh" slices on a phone).  Mesher.vertex(verts,
+  -- i) or verts[i] gives one back as a table; scene.lua uploads the blocks.
+  local blocks = {}
+  local verts = setmetatable({ packed = blocks }, PACKED)
+  local idx = {}
   local nv, ni = 0, 0
+  local function put(i, x, y, z, u, v, s, a)
+    local bi = floor((i - 1) / BLOCK) + 1
+    local blk = blocks[bi]
+    if not blk then blk = tnew(BLOCK * 11, 0); blocks[bi] = blk end
+    local o = ((i - 1) % BLOCK) * 11
+    blk[o + 1], blk[o + 2], blk[o + 3], blk[o + 4], blk[o + 5] = x, y, z, u, v
+    blk[o + 6], blk[o + 7], blk[o + 8], blk[o + 9], blk[o + 10], blk[o + 11] = 0, 0, s, s, s, a
+  end
 
   -- alpha is a flag for the shader, not transparency: 1 on tops, which
   -- take the baked sun/ambient light (lighting.lua), 0 on walls
@@ -67,12 +123,15 @@ function Mesher.build(grid, VOXEL, tick, region)
   -- walls that are not a building's (grid.B) are 0.03: no lit windows
   -- swaying foliage that is not a leaf canopy (grid.SW): 0.7 on its top,
   -- 0.2 on its walls (a leaf canopy sways too)
-  local leaf, water, obj, sway = false, false, false, false
+  -- side walls (east and west faces, which draw a column of the art
+  -- stretched along the depth) are 0.05: the shader lights no windows on
+  -- them (a window's column smeared up a side wall was a bright strip)
+  local leaf, water, obj, sway, side = false, false, false, false, false
   local function vert(x, y, z, u, v, s, top)
     nv = nv + 1
     local a = top and (water and 0.97 or (leaf and 0.9 or (sway and 0.7 or 1)))
-      or (leaf and 0.3 or (sway and 0.2 or (obj and 0.03 or 0)))
-    verts[nv] = { x, y, z, u, v, 0, 0, s, s, s, a }
+      or (leaf and 0.3 or (sway and 0.2 or (side and 0.05 or (obj and 0.03 or 0))))
+    put(nv, x, y, z, u, v, s, a)
   end
 
   local function quadIdx()
@@ -91,12 +150,16 @@ function Mesher.build(grid, VOXEL, tick, region)
   end
 
   -- ------- tops: greedy rectangles of equal (H, S, K, C, L)
-  local done = {}
+  -- (done: by the region's own index, made at its full size -- a hash
+  -- over a whole map's voxel numbers was copied whole at every doubling)
+  local RW = VX1 - VX0
+  local done = tnew(max(0, RW * (VY1 - VY0)), 0)
+  local function dk(x, y) return (y - VY0) * RW + (x - VX0) + 1 end
   for vy = VY0, VY1 - 1 do
     tick()
     for vx = VX0, VX1 - 1 do
       local a = k(vx, vy)
-      if not done[a] then
+      if not done[dk(vx, vy)] then
         local h, s, kk, cc, l, f, sw, uo = H[a], S[a], K[a], C[a], L[a], F[a], SW[a], U[a]
         leaf, sway = f == true, sw == true
         water = h < 0
@@ -106,15 +169,16 @@ function Mesher.build(grid, VOXEL, tick, region)
         local w = 1
         while vx + w < VX1 and w < cap do
           local c = k(vx + w, vy)
-          if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then break end
+          if done[dk(vx + w, vy)] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then break end
           w = w + 1
         end
         local hgt = 1
         while vy + hgt < VY1 and hgt < cap do
+          if hgt % 32 == 0 then tick() end
           local ok = true
           for i = 0, w - 1 do
             local c = k(vx + i, vy + hgt)
-            if done[c] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then
+            if done[dk(vx + i, vy + hgt)] or H[c] ~= h or S[c] ~= s or K[c] ~= kk or C[c] ~= cc or L[c] ~= l or F[c] ~= f or SW[c] ~= sw or U[c] ~= uo then
               ok = false
               break
             end
@@ -123,7 +187,7 @@ function Mesher.build(grid, VOXEL, tick, region)
           hgt = hgt + 1
         end
         for j = 0, hgt - 1 do
-          for i = 0, w - 1 do done[k(vx + i, vy + j)] = true end
+          for i = 0, w - 1 do done[dk(vx + i, vy + j)] = true end
         end
         local x1, y1 = px + vx * VOXEL - E, py + vy * VOXEL - E
         local x2, y2 = px + (vx + w) * VOXEL + E, py + (vy + hgt) * VOXEL + E
@@ -315,8 +379,10 @@ function Mesher.build(grid, VOXEL, tick, region)
       end
     end
   end
+  side = true
   sides(1, SHADE_EAST, -0.5)
   sides(-1, SHADE_WEST, 0.5)
+  side = false
 
   -- ------- waterfalls (heightfield.lua grid.falls): a sheet of water
   -- sloping from the cliff tops down to the pool, the art laid on it row
@@ -334,25 +400,26 @@ function Mesher.build(grid, VOXEL, tick, region)
       local za, zb = z0 + (z1 - z0) * i / n, z0 + (z1 - z0) * (i + 1) / n
       local sa, sb = 0.96, 0.96
       nv = nv + 4
-      verts[nv - 3] = { x1, ya, za, x1, ya, 0, 0, sa, sa, sa, FALLS_TOP }
-      verts[nv - 2] = { x2, ya, za, x2, ya, 0, 0, sa, sa, sa, FALLS_TOP }
-      verts[nv - 1] = { x2, yb, zb, x2, yb, 0, 0, sb, sb, sb, FALLS_TOP }
-      verts[nv] = { x1, yb, zb, x1, yb, 0, 0, sb, sb, sb, FALLS_TOP }
+      put(nv - 3, x1, ya, za, x1, ya, sa, FALLS_TOP)
+      put(nv - 2, x2, ya, za, x2, ya, sa, FALLS_TOP)
+      put(nv - 1, x2, yb, zb, x2, yb, sb, FALLS_TOP)
+      put(nv, x1, yb, zb, x1, yb, sb, FALLS_TOP)
       quadIdx()
     end
     -- the sides: a triangle each, from the slope's edge down to the water
     for _, sd in ipairs({ { f.x1, SHADE_WEST }, { f.x2, SHADE_EAST } }) do
       local x, sh = sd[1], sd[2] * 0.8
       nv = nv + 4
-      verts[nv - 3] = { x, y0, z0, x, y0, 0, 0, sh, sh, sh, FALLS_SIDE }
-      verts[nv - 2] = { x, y1, z1, x, y1, 0, 0, sh, sh, sh, FALLS_SIDE }
-      verts[nv - 1] = { x, y1, z1, x, y1, 0, 0, sh, sh, sh, FALLS_SIDE }
-      verts[nv] = { x, y0, z1, x, y0, 0, 0, sh, sh, sh, FALLS_SIDE }
+      put(nv - 3, x, y0, z0, x, y0, sh, FALLS_SIDE)
+      put(nv - 2, x, y1, z1, x, y1, sh, FALLS_SIDE)
+      put(nv - 1, x, y1, z1, x, y1, sh, FALLS_SIDE)
+      put(nv, x, y0, z1, x, y0, sh, FALLS_SIDE)
       quadIdx()
     end
     ::nextFall::
   end
 
+  verts.n = nv
   return verts, idx, nv, ni
 end
 

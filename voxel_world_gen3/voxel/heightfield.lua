@@ -39,6 +39,22 @@ local RUNX = 40
 local RAMP = 12 * CELL
 
 local floor, max, min = math.floor, math.max, math.min
+-- (arrays over every voxel of a whole map are made at their full size up
+-- front where LuaJIT can: grown one entry at a time, each doubling copied
+-- the whole array in one go -- 5-8 ms on a desktop, several times that on
+-- a phone, inside a single background slice)
+-- neighbour offsets, made once (built anew in the loops, they were garbage
+-- by the hundred thousand on a whole map -- the collector's work landed in
+-- the background build's slices)
+local D4_EWSN = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+local D4_SNWE = { { 0, 1 }, { 0, -1 }, { -1, 0 }, { 1, 0 } }
+local D2_ES = { { 1, 0 }, { 0, 1 } }
+local D4_SNEW2 = { { 0, 2 }, { 0, -2 }, { 2, 0 }, { -2, 0 } }
+local tnew = (function()
+  local ok, f = pcall(require, "table.new")
+  if ok and type(f) == "function" then return f end
+  return function() return {} end
+end)()
 
 local function snap(v)
   return floor(v / VOXEL + 0.5) * VOXEL
@@ -120,7 +136,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     px = x0 * CELL, py = y0 * CELL, -- world pixel of voxel (0,0)
     -- per voxel: H top height, S facade height, K/C texture row of the top
     -- (v = K*y + C), L shade, W walkable (a tree's canopy row)
-    H = {}, S = {}, K = {}, C = {}, L = {}, W = {}, R = {}, F = {}, FL = {},
+    W = {}, R = {}, F = {}, FL = {},
     -- light sources for the night (lighting.lua): lamps, lit doorways
     lights = {},
     B = {}, -- buildings (under a roof): only their walls have lit windows
@@ -130,6 +146,11 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- row held, instead of the art running on (a wall taller than its art)
     U = {}, CAP = {},
   }
+  -- (one at a time, the frame given back between them)
+  for _, f in ipairs({ "H", "S", "K", "C", "L", "F", "B" }) do
+    grid[f] = tnew(vcols * vrows, 0)
+    tick()
+  end
   local H, S, K, C, L, W, R = grid.H, grid.S, grid.K, grid.C, grid.L, grid.W, grid.R
   local F = grid.F
   local FL = grid.FL
@@ -214,6 +235,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     for yy = RY0, RY1 do
       tick() -- (all of a whole map and its margin: tens of ms on a phone)
       for xx = RX0, RX1 do
+        -- (a cell's first look copies it from the map: a row at a time
+        -- was still several ms on a big map)
+        if (xx - RX0) % 16 == 15 then tick() end
         local n = at(xx, yy)
         if n and not n.border and n.mid ~= nil
             and (n.kind == "water" or ((n.kind == "ground" or n.kind == "grass") and not n.canopy)) then
@@ -495,10 +519,266 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- level stands on its cliff instead of lying flat behind a wall of rock.
   -- (Only elevation the game stores: a ledge or a cliff on one level --
   -- most FireRed routes -- stays on it.)
-  local terrain = opts.terrain == true and not opts.cave and opts.indoor ~= true
+  local terrain = (opts.terrain == true or opts.terrain == "art") and not opts.cave and opts.indoor ~= true
+  local artTerrain = terrain and opts.terrain == "art"
   local floorCache = {}
+
+  -- ------- raised ground from the art (opts.terrain == "art")
+  -- The art draws a plateau as ground behind a cliff face: rock seen from
+  -- the south, two or more cells deep.  Ground the player can walk across
+  -- without crossing a cliff, a ledge or a stair is one level ("a field");
+  -- a field behind a cliff stands on top of it, as high as the cliff the
+  -- art draws; one behind a ledge a lip higher.  Fields are found by walking
+  -- the map, so ground that can be reached around a cliff stays level with
+  -- it -- only true plateaus rise.  The sea's field (or the biggest one) is
+  -- the ground level.  Water belongs to the field around it.
+  -- Stairs (RSE: the walkable "either level" cells between two levels)
+  -- join two fields without levelling them, and climb between them below.
+  local artFloor -- [key] = floor px, for walkable and water cells
+  local fieldOf -- [key] = field id
+  local function cellKey(cx, cy) return (cy - y0 + 64) * 65536 + (cx - x0 + 64) end
+  local function isStairCell(cx, cy)
+    local c = at(cx, cy)
+    if not (c and (c.elev == 0 or c.elev == 15) and (c.kind == "ground" or c.kind == "grass")) then return false end
+    -- between two different stored levels, in a line, within 6 cells
+    local function endLevel(dx, dy)
+      for n = 1, 6 do
+        local e = at(cx + dx * n, cy + dy * n)
+        if not (e and (e.kind == "ground" or e.kind == "grass" or e.kind == "door")) then return nil end
+        if e.elev ~= 0 and e.elev ~= 15 then return e.elev end
+      end
+      return nil
+    end
+    local a, b = endLevel(0, -1), endLevel(0, 1)
+    if a and b and a ~= b then return true end
+    a, b = endLevel(-1, 0), endLevel(1, 0)
+    return a ~= nil and b ~= nil and a ~= b
+  end
+  local function buildArtFloors()
+    artFloor, fieldOf = {}, {}
+    local X0, Y0 = x0 - RUNX, y0 - RUNX
+    local X1, Y1 = x0 + cols - 1 + RUNX, y0 + rows - 1 + RUNX
+    local function inR(x, y) return x >= X0 and y >= Y0 and x <= X1 and y <= Y1 end
+    local stairMemo = {}
+    local function stair(x, y)
+      local kk = cellKey(x, y)
+      local v = stairMemo[kk]
+      if v == nil then v = isStairCell(x, y); stairMemo[kk] = v end
+      return v
+    end
+    local function member(x, y)
+      local c = at(x, y)
+      if not c or c.border then return false end
+      local k = c.kind
+      -- (water is not a field: it lies at its own level; raised with the
+      -- ground it touched, the sea behind the Space Center rose with the hill)
+      if k == "ground" or k == "grass" or k == "door" then return not stair(x, y) end
+      return false
+    end
+    -- two cells the game keeps on different levels never share a field
+    -- (Ruby/Sapphire/Emerald store a level per cell: 0 and 15 are "either")
+    local function sameLevel(x1, y1, x2, y2)
+      local a, b = at(x1, y1), at(x2, y2)
+      local ea, eb = a and a.elev, b and b.elev
+      if not ea or not eb or ea == 0 or eb == 0 or ea == 15 or eb == 15 then return true end
+      return ea == eb
+    end
+    local function nearWater(x, y)
+      for _, d in ipairs(D4_EWSN) do
+        local n = at(x + d[1], y + d[2])
+        if n and n.kind == "water" then return true end
+      end
+      return false
+    end
+    -- fields: flood over walkable ground and water
+    local fields, nf = {}, 0
+    for y = Y0, Y1 do
+      tick()
+      for x = X0, X1 do
+        if (x - X0) % 16 == 15 then tick() end
+        local kk = cellKey(x, y)
+        if fieldOf[kk] == nil and member(x, y) then
+          nf = nf + 1
+          local f = { id = nf, n = 0, water = 0 }
+          fields[nf] = f
+          local stack = { x, y }
+          fieldOf[kk] = nf
+          while #stack > 0 do
+            local sy = table.remove(stack)
+            local sx = table.remove(stack)
+            f.n = f.n + 1
+            if nearWater(sx, sy) then f.water = f.water + 1 end
+            if f.n % 128 == 0 then tick() end
+            for _, d in ipairs(D4_EWSN) do
+              local nx, ny = sx + d[1], sy + d[2]
+              local nk = cellKey(nx, ny)
+              if inR(nx, ny) and fieldOf[nk] == nil and member(nx, ny) and sameLevel(sx, sy, nx, ny) then
+                fieldOf[nk] = nf
+                stack[#stack + 1] = nx
+                stack[#stack + 1] = ny
+              end
+            end
+          end
+        end
+      end
+    end
+    -- what the art says between fields: votes per pair, "a over b by d"
+    local votes = {}
+    local function vote(a, b, d, ledge)
+      if not (a and b) or a == b then return end
+      local key = a < b and (a .. ":" .. b) or (b .. ":" .. a)
+      local v = votes[key]
+      if not v then v = { a = a < b and a or b, b = a < b and b or a, d = {}, ledge = true }; votes[key] = v end
+      if not ledge then v.ledge = false end
+      local dd = (a < b) and d or -d
+      v.d[dd] = (v.d[dd] or 0) + 1
+    end
+    for x = X0, X1 do
+      tick()
+      local y = Y0
+      while y <= Y1 do
+        local c = at(x, y)
+        if c and not c.border and c.kind == "solid" and kindOf(x, y) == "solid" and not c.tree then
+          local top = y
+          while y + 1 <= Y1 do
+            local n = at(x, y + 1)
+            if not (n and not n.border and n.kind == "solid" and kindOf(x, y + 1) == "solid" and not n.tree) then break end
+            y = y + 1
+          end
+          local bottom = y
+          local cells = bottom - top + 1
+          local up, dn = fieldOf[cellKey(x, top - 1)], fieldOf[cellKey(x, bottom + 1)]
+          if up and dn and up ~= dn and cells >= 2 and cells <= 8 then
+            local rocky, door = 0, false
+            for yy = top, bottom do
+              local cc = at(x, yy)
+              if cc.cliff or rockCell(x, yy) then rocky = rocky + 1 end
+            end
+            for yy = top, bottom + 1 do
+              local cc = at(x, yy)
+              if cc and cc.kind == "door" then door = true end
+            end
+            if not door and rocky * 2 >= cells then
+              vote(up, dn, snap(HF.runHeight(min(cells, 3), false) * scale))
+            end
+          end
+        elseif c and c.kind == "ledge" then
+          -- the side you jump from is a lip higher than the side you land on
+          local dir = ({ [0xA0] = { 1, 0 }, [0xA1] = { -1, 0 }, [0xA2] = { 0, -1 }, [0xA3] = { 0, 1 } })[c.coll or 0xA3] or { 0, 1 }
+          local hi = fieldOf[cellKey(x - dir[1], y - dir[2])]
+          local lo = fieldOf[cellKey(x + dir[1], y + dir[2])]
+          vote(hi, lo, snap(8 * scale), true)
+        end
+        y = y + 1
+      end
+    end
+    -- fields side by side on different stored levels, with no cliff drawn
+    -- between them (a step the art draws as a bank): a lip per level
+    for y = Y0, Y1 do
+      tick()
+      for x = X0, X1 do
+        local a = fieldOf[cellKey(x, y)]
+        if a then
+          for _, d in ipairs(D2_ES) do
+            local b = fieldOf[cellKey(x + d[1], y + d[2])]
+            if b and b ~= a then
+              local ea, eb = at(x, y).elev, at(x + d[1], y + d[2]).elev
+              if ea and eb then vote(a, b, snap(8 * scale) * (ea > eb and 1 or -1)) end
+            end
+          end
+        end
+      end
+    end
+    -- levels: from the sea's field (else the biggest), each pair by its
+    -- strongest vote (two or more columns agreeing: a lone boulder between
+    -- two fields does not lift one of them)
+    local adj = {}
+    for _, v in pairs(votes) do
+      local best, bn, total = nil, 0, 0
+      for d, n in pairs(v.d) do
+        total = total + n
+        if n > bn then best, bn = d, n end
+      end
+      if bn >= 2 then
+        adj[v.a] = adj[v.a] or {}
+        adj[v.b] = adj[v.b] or {}
+        adj[v.a][#adj[v.a] + 1] = { v.b, -best, bn, v.ledge } -- a = b + best: b = a - best
+        adj[v.b][#adj[v.b] + 1] = { v.a, best, bn, v.ledge }
+      end
+    end
+    local base, bw, bn = nil, -1, -1
+    for id, f in ipairs(fields) do
+      if f.water > bw or (f.water == bw and f.n > bn) then base, bw, bn = id, f.water, f.n end
+    end
+    local level = {}
+    -- (ledges never stack: a field is at most one lip above the ground it
+    -- is reached from by ledges alone -- Route 5's fenced strip, a ledge
+    -- every few rows, stood as a five-step tower 40 px over the sand
+    -- beside it, where the game has one level)
+    local lift = {}
+    local CAP = snap(96 * scale)
+    local function solve(start)
+      level[start] = level[start] or 0
+      lift[start] = lift[start] or 0
+      local q, qh = { start }, 1
+      while qh <= #q do
+        tick()
+        local a = q[qh]; qh = qh + 1
+        local list = adj[a] or {}
+        table.sort(list, function(p, r) return p[3] > r[3] end)
+        for _, e in ipairs(list) do
+          if level[e[1]] == nil then
+            local step = e[2]
+            local lf = 0
+            if e[4] then
+              if step > 0 then
+                lf = lift[a] + 1
+                if lf > 1 then step, lf = 0, lift[a] end
+              elseif step < 0 then
+                if lift[a] == 0 then step = 0 end -- (down a ledge from the ground: stays the ground)
+                lf = 0
+              end
+            end
+            lift[e[1]] = lf
+            local l = level[a] + step
+            if l < 0 then l = 0 elseif l > CAP then l = CAP end
+            level[e[1]] = l
+            q[#q + 1] = e[1]
+          end
+        end
+      end
+    end
+    if base then solve(base) end
+    for id in ipairs(fields) do if level[id] == nil then solve(id) end end
+    local na = 0
+    for kk, id in pairs(fieldOf) do
+      artFloor[kk] = level[id] or 0
+      na = na + 1
+      if na % 2048 == 0 then tick() end
+    end
+    grid.fields, grid.fieldLevels = nf, 0
+    for _, l in pairs(level) do if l > 0 then grid.fieldLevels = grid.fieldLevels + 1 end end
+  end
+
   local function floorOf(cx, cy)
     if not (opts.cave or terrain) then return 0 end
+    if artTerrain then
+      if not artFloor then buildArtFloors() end
+      local kk = cellKey(cx, cy)
+      local f = artFloor[kk]
+      if f then return f end
+      local c = at(cx, cy)
+      if c and (c.kind == "ledge" or c.kind == "ground" or c.kind == "grass") then
+        -- a ledge or a stair: the higher of the ground beside it
+        local m
+        for _, d in ipairs(D4_SNWE) do
+          local n = artFloor[cellKey(cx + d[1], cy + d[2])]
+          if n and (m == nil or n > m) then m = n end
+        end
+        return m or 0
+      end
+      return nil
+    end
     local key = (cy - y0 + 64) * 65536 + (cx - x0 + 64)
     local f = floorCache[key]
     if f ~= nil then return f or nil end
@@ -512,7 +792,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       if e == 0 or e == 15 then
         -- stairs, bridges: the lowest level beside them
         e = nil
-        for _, d in ipairs({ { 0, 1 }, { 0, -1 }, { -1, 0 }, { 1, 0 } }) do
+        for _, d in ipairs(D4_SNWE) do
           local n = at(cx + d[1], cy + d[2])
           local ne = n and walk(n) and n.elev
           if ne and ne ~= 0 and ne ~= 15 and (e == nil or ne < e) then e = ne end
@@ -536,6 +816,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
               local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
               -- (S: a floor's open side shows the art below it, not a smear)
               H[k], S[k], FL[k] = H[k] + f, f, f
+              if H[k] < f then FL[k] = H[k] end -- (water on a plateau: its surface)
             end
           end
         end
@@ -560,6 +841,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         local c = at(x + dx * n, y + dy * n)
         if not walkC(c) then return nil end
         if not between(c) then
+          if artTerrain then return floorOf(x + dx * n, y + dy * n), n - 1 end
           local e = c.elev
           if not e then return nil end
           return max(0, e - 3) * LEVEL, n - 1
@@ -623,7 +905,8 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- the cell grid (see the crown pass after the runs); the voxels to shape
   -- are noted here: [voxel] = the run's height
   local artCrowns = opts.trees == "art" and round and color ~= nil
-  local crownVox = artCrowns and {} or nil
+  local crownVox = artCrowns and tnew(vcols * vrows, 0) or nil
+  local crownBase = {} -- (opts.terrain) the floor a crown's tree stands on
   local ROUND_X = roundP and roundP.x
   local ROUND_Y2 = roundP and roundP.y2
   local ROUND_Y1 = roundP and roundP.y1
@@ -727,8 +1010,14 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- fill: one continuous canopy (Ruby/Sapphire/Emerald forests, whose art
   -- draws every tree as a round crown on teal -- domed one by one they read
   -- as a pegboard): rounded only where the forest ends, not between trees
-  local function stamp(cx, ytop, ybottom, h, foliage, walk, lo, hi, dome, fill, leafy, clipT, clipB)
+  -- base: the floor the thing stands on (opts.terrain): its art is read
+  -- lifted by its own height above that floor, not by its height above the
+  -- sea -- a house on a plateau 40 up read its roof from 72 px away, the
+  -- Space Center its whole front from the stairs below it
+  local function stamp(cx, ytop, ybottom, h, foliage, walk, lo, hi, dome, fill, leafy, clipT, clipB, base)
     lo, hi = lo or -4, hi or 4
+    local hA = h - (base or 0) -- (the art's lift)
+    if hA < VOXEL then hA = VOXEL end
     -- where the two-cell trees start: from the run's real end (a run cut
     -- off by the build window pairs from the end that is really there, so
     -- the pairing does not shift as you walk)
@@ -742,14 +1031,14 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- run is cut off by the build window, and its length changed as you
     -- walked.  Within RAMP of the top a run's length is its own.)
     local R = min(len, RAMP)
-    local kA = max(R - h, VOXEL) / R
-    local cA = (Y0 + R - h) - kA * (Y0 + R)
+    local kA = max(R - hA, VOXEL) / R
+    local cA = (Y0 + R - hA) - kA * (Y0 + R)
     local YR = Y0 + R
     local function kc(wy)
       if wy < YR then return kA, cA end
-      return 1, -h
+      return 1, -hA
     end
-    local maxDrop = floor(h * 0.6 / 2) * 2
+    local maxDrop = floor(hA * 0.6 / 2) * 2
     -- (the gaps shape the crown only near a gap the art shows: a whole
     -- column switching between the two whenever a gap came into view
     -- reshaped Rock Tunnel's walls at every step)
@@ -789,6 +1078,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
               -- (reshaped later from the art, near the gaps it shows;
               -- elsewhere -- a jungle with no gaps -- the dome below stays)
               crownVox[vindex(vx, vy)] = h
+              if base and base > 0 then crownBase[vindex(vx, vy)] = base end
             end
             if dome then
               -- the crown's shape comes from the dome, not the art
@@ -859,7 +1149,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     return math.abs(a.r - b.r) < 0.09 and math.abs(a.g - b.g) < 0.09 and math.abs(a.b - b.b) < 0.09
   end
 
-  local function addRoof(cx, top, bottom, h)
+  local function addRoof(cx, top, bottom, h, base)
     local key = top .. ":" .. bottom .. ":" .. h
     local r = openRoof[key]
     local st = roofHue(cx, top)
@@ -881,9 +1171,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     end
     local Y0, Y1 = top * CELL, (bottom + 1) * CELL
     local len = Y1 - Y0
-    local kk = max(len - h, VOXEL) / len
+    local hA = h - (base or 0) -- (the art's lift: see stamp)
+    local kk = max(len - hA, VOXEL) / len
     r = { cx2 = cx, x1 = cx * CELL, x2 = (cx + 1) * CELL, y0 = Y0, y1 = Y1,
-          h = h, k = kk, c = (Y1 - h) - kk * Y1, maxRise = 20 * scale, st = st,
+          h = h, k = kk, c = (Y1 - hA) - kk * Y1, maxRise = 20 * scale, st = st,
           ridge = opts.ridge == "ew" and "ew" or "ns", hsum = { 0, 0, 0, 0 } }
     addHue(r)
     openRoof[key] = r
@@ -1086,7 +1377,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       local m = sm(cx, cy)
       if not m or not (crown(cx, cy) or notRock(cx, cy, m)) then return false end
       local votes, seen = 0, 0
-      for _, d in ipairs({ { 0, 2 }, { 0, -2 }, { 2, 0 }, { -2, 0 } }) do
+      for _, d in ipairs(D4_SNEW2) do
         local m2 = sm(cx + d[1], cy + d[2])
         if m2 ~= nil then
           seen = seen + 1
@@ -1117,7 +1408,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           -- (a forest needs a few such cells together: one stray match on
           -- a patterned roof is not a tree)
           local n = 0
-          for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+          for _, d in ipairs(D4_EWSN) do
             if forest(cx + d[1], cy + d[2]) then n = n + 1 end
           end
           if n >= 2 then marks[#marks + 1] = at(cx, cy) end
@@ -1338,6 +1629,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         -- cliffs beside the tower sank to a cave mound's 16 px)
         local function caveIn(x)
           for y = top, bottom + 1 do
+            if (y - top) % 16 == 15 then tick() end
             local c = at(x, y)
             if isCaveMouth(c) and (not color or rockCell(x, y - 1) or rockCell(x, y - 2)
                 or not cellStats(x, y - 1)) then return true end
@@ -1365,7 +1657,9 @@ function HF.build(provider, x0, y0, cols, rows, opts)
             -- only through the mound itself: stop at open ground and at
             -- the forest beside it (tree cells, or green art)
             local solidRow, leafy = false, false
+            tick()
             for y = top, bottom do
+              if (y - top) % 16 == 15 then tick() end
               if struct(x, y) then solidRow = true end
               local c = at(x, y)
               if c and (c.tree or c.canopy) then leafy = true end
@@ -1575,6 +1869,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         if small then base = HF.runHeight(min(cells, 2), false) end
         local h = snap(base * scale)
         if h < VOXEL then h = VOXEL end
+        local runBase = 0
         if opts.cave or terrain then
           local up, dn = floorOf(cx, top - 1), floorOf(cx, bottom + 1)
           -- (outdoors a house or a tree in front of a terrace stands on the
@@ -1594,17 +1889,20 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           if up and up > (dn or 0) and (opts.cave or rock or not (house or tree or foliage)) then
             -- a cliff (however shallow) is as tall as the floor it holds up
             h = up
+            if terrain then runBase = dn or 0 end
           elseif rock then
             -- a wall with no floor above it stands its usual height over
             -- the floor in front
             h = max(up or 0, dn or 0) + h
+            if terrain then runBase = max(up or 0, dn or 0) end
           else
             -- a boulder, a sign: standing on the floor in front of it
             h = h + (dn or up or 0)
+            if terrain then runBase = dn or up or 0 end
           end
         end
         if rock then
-          stamp(cx, top, bottom, h, lumps, nil, -4, 6)
+          stamp(cx, top, bottom, h, lumps, nil, -4, 6, nil, nil, nil, nil, nil, runBase)
           markRock(cx, top, bottom)
         else
           local artRun = false
@@ -1616,7 +1914,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
           end
           local clipT, clipB = top <= y0 - RUNX, bottom >= y0 + rows + RUNX
           stamp(cx, top, bottom, h, foliage, walk, nil, nil, round and foliage, artRun, foliage and not caveMound,
-            clipT, clipB)
+            clipT, clipB, runBase)
           -- a cave mound is a plain block with its art on top: flattening
           -- parts of it by colour, or slanting its walls like rock, cut it
           -- into tall slivers (the "spires")
@@ -1633,7 +1931,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
               if rockCell(cx, y) or (st and isRockColor(st.r, st.g, st.b)) then rocky = rocky + 1 end
             end
             if rocky * 2 <= n then
-              addRoof(cx, top, bottom, h)
+              addRoof(cx, top, bottom, h, runBase)
             else
               markRock(cx, top, bottom)
               rockyCols[cx] = { top = top, bottom = bottom, h = h }
@@ -1881,7 +2179,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- over, a busy jumble of little mounds.
     do
       local turn = {}
+      local nt = 0
       for k, v in pairs(dist) do
+        nt = nt + 1
+        if nt % 1024 == 0 then tick() end
         if v == "dark" then
           local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
           local edge = false
@@ -1904,7 +2205,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
     -- crown counts as an edge: a forest rounds off where it ends)
     local function d(k) return dist[k] or 0 end
     for vy = 0, vrows - 1 do
-      if vy % 16 == 0 then tick() end
+      if vy % 4 == 0 then tick() end
       for vx = 0, vcols - 1 do
         local k = vy * vcols + vx + 1
         local v = dist[k]
@@ -1921,7 +2222,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       end
     end
     for vy = vrows - 1, 0, -1 do
-      if vy % 16 == 0 then tick() end
+      if vy % 4 == 0 then tick() end
       for vx = vcols - 1, 0, -1 do
         local k = vy * vcols + vx + 1
         local v = dist[k]
@@ -1966,7 +2267,10 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       -- between every pair of trees read as grooves down the rows again)
       local open = {}
       local oq, oh = {}, 1
+      local ng = 0
       for k in pairs(tealGap) do
+        ng = ng + 1
+        if ng % 256 == 0 then tick() end
         if crownVox[k] and edgeGap(k) then open[k] = true; oq[#oq + 1] = k end
       end
       while oh <= #oq do
@@ -1991,7 +2295,12 @@ function HF.build(provider, x0, y0, cols, rows, opts)
       end
     end
     local shaped = 0
-    for k, h in pairs(crownVox) do
+    local nshape = 0
+    for k, hTop in pairs(crownVox) do
+      nshape = nshape + 1
+      if nshape % 512 == 0 then tick() end
+      -- (h: the tree's own height, above the floor it stands on)
+      local h = hTop - (crownBase[k] or 0)
       local dk = dist[k]
       if type(dk) == "number" and dk <= 5 then
         local drop = (type(dk) == "number" and CROWN[dk]) or 0
@@ -2046,15 +2355,327 @@ function HF.build(provider, x0, y0, cols, rows, opts)
         end
         -- the art's row as it was before the dome lowered this voxel
         local oldTop = H[k]
-        local cc = C[k] - ((oldTop < h) and (h - oldTop) or 0)
-        local top = h - drop
+        local cc = C[k] - ((oldTop < hTop) and (hTop - oldTop) or 0)
+        local top = hTop - drop
         H[k] = top
-        if top < h then S[k], C[k] = top, cc + (h - top) else S[k], C[k] = h, cc end
+        if top < hTop then S[k], C[k] = top, cc + (hTop - top) else S[k], C[k] = hTop, cc end
         L[k] = floor((1 - 0.02 * drop) * 32 + 0.5) / 32
         shaped = shaped + 1
       end
     end
     grid.crownVoxels = shaped
+  end
+
+  -- Rock from its art (opts.rocks == "art").  A mountain was a block: flat
+  -- on top, sheer at every edge, its crags only painted on.  Here its top
+  -- rounds off toward every edge where it stands above what is around it
+  -- (a shoulder, a few px over the outer voxels), and the art's own cracks
+  -- -- the darkest lines in it, darker than the rock around them -- lie a
+  -- step lower, so the crags the game draws are crags.  Heights in 2 px
+  -- steps; the art is read as it was (the same rows, lowered with the
+  -- top), nothing is smoothed.  Where a cliff holds up a plateau (the same
+  -- height beside it), nothing is rounded.
+  -- Never in a town (its walls and big buildings are often as beige as a
+  -- cliff, and taken for one), and never a building elsewhere: nothing
+  -- within three columns of a house door below it.  (Not by the roofs:
+  -- which runs get one depends on where the build window cuts them.)
+  if opts.rocks == "art" and color and not opts.town then
+    tick()
+    -- the four neighbours of a voxel (nil past the left or right edge)
+    local function nbr4(k, vx, i)
+      if i == 1 then return vx > 0 and k - 1 or nil end
+      if i == 2 then return vx < vcols - 1 and k + 1 or nil end
+      if i == 3 then return k - vcols end
+      return k + vcols
+    end
+    -- the house doors in reach (one look at every cell, row by row)
+    local doors = {}
+    for y = y0, y0 + rows + 5 do
+      for x = x0 - 3, x0 + cols + 2 do
+        local c = at(x, y)
+        if c and c.kind == "door" and not c.caveDoor and (c.warpDoor or not c.behKnown) then doors[#doors + 1] = { x, y } end
+      end
+      tick()
+    end
+    local nearDoor = {}
+    local function houseNear(cx, cy)
+      local key = cy * 65536 + cx
+      local v = nearDoor[key]
+      if v ~= nil then return v end
+      v = false
+      for _, d in ipairs(doors) do
+        if d[2] >= cy and d[2] <= cy + 6 and d[1] >= cx - 3 and d[1] <= cx + 3 then v = true break end
+      end
+      nearDoor[key] = v
+      return v
+    end
+    -- a cell drawn mostly green is a tree or a bush on the cliff, not rock
+    local greenCell = {}
+    local function green(cx, cy)
+      local key = cy * 65536 + cx
+      local v = greenCell[key]
+      if v ~= nil then return v end
+      local n = 0
+      for j = 0, 3 do
+        for i = 0, 3 do
+          local r, g, b = color(cx * CELL + i * 4 + 2, cy * CELL + j * 4 + 2)
+          if r and g > r * 1.1 and g > b then n = n + 1 end
+        end
+      end
+      v = n >= 10
+      greenCell[key] = v
+      return v
+    end
+    local rockTop, banned = {}, {}
+    local nr = 0
+    -- (a rock in the sea, or at its edge, is left as it is: the sea's
+    -- boulders are rounded already, and a lowered shore would show water
+    -- where the game draws rock)
+    local wetMemo = {}
+    local function wetBeside(cx, cy)
+      local key = cy * 65536 + cx
+      local v = wetMemo[key]
+      if v ~= nil then return v end
+      v = false
+      for i = 1, 4 do
+        local c = at(cx + (i == 1 and -1 or i == 2 and 1 or 0), cy + (i == 3 and -1 or i == 4 and 1 or 0))
+        if c and (c.kind == "water" or c.waterfall) then v = true break end
+      end
+      wetMemo[key] = v
+      return v
+    end
+    -- (rim: a cell drawn half green -- a mountain's grassy edge -- may
+    -- sink with the rock beside it, though it does not count as rock)
+    local function keep(k, rim)
+      local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+      local cx, cy = x0 + floor(vx / PER), y0 + floor(vy / PER)
+      local c = at(cx, cy)
+      return not (c and c.tree) and not F[k] and not (crownVox and crownVox[k])
+        and not houseNear(cx, cy) and (rim or not green(cx, cy))
+        and not wetBeside(cx, cy)
+    end
+    -- (judged from the cell itself only: never past the map's edge, and
+    -- never from what an earlier build remembered of a tile -- that
+    -- depends on where you have been)
+    local function rockHere(cx, cy)
+      local c = at(cx, cy)
+      if not c or c.border then return false end
+      if c.cliff then return true end
+      local hits = 0
+      for i = 0, 3 do
+        local r, g, b = color(cx * CELL + 3 + (i % 2) * 9, cy * CELL + 3 + floor(i / 2) * 9)
+        if not r then return false end
+        if isRockColor(r, g, b) then hits = hits + 1 end
+      end
+      return hits >= 3
+    end
+    -- rock by its cell (rock-coloured art, or a cliff), not by R: R comes
+    -- from judging whole runs, and where the build window cuts a run it
+    -- changes as you walk -- the tops would change shape with it
+    for cy = y0, y0 + rows - 1 do
+      for cx = x0, x0 + cols - 1 do
+        if rockHere(cx, cy) then
+          for j = 0, PER - 1 do
+            for i = 0, PER - 1 do
+              local k = vindex((cx - x0) * PER + i, (cy - y0) * PER + j)
+              local h = H[k]
+              if h and h > (FL[k] or 0) + 16 then
+                nr = nr + 1
+                if nr % 32 == 0 then tick() end
+                if keep(k) then rockTop[k] = h else banned[k] = true end
+              end
+            end
+          end
+        end
+      end
+      tick()
+    end
+    -- the rim: the art's outline round a mountain is often not rock (a
+    -- cell's edge column, drawn half grass), yet stands as tall as it.
+    -- Left out it would stay up as a thin fence while the rock inside
+    -- sinks, so it sinks with the rock (a cell's width in at most).
+    -- (never a house beside it, nor a tree)
+    local function underRoof(n) return not keep(n, true) end
+    for _ = 1, 4 do
+      local add = {}
+      local nr2 = 0
+      for k, h in pairs(rockTop) do
+        nr2 = nr2 + 1
+        if nr2 % 64 == 0 then tick() end
+        local vx = (k - 1) % vcols
+        for i4 = 1, 4 do
+          local n = nbr4(k, vx, i4)
+          local hn = n and not rockTop[n] and add[n] == nil and H[n]
+          if hn and hn > (FL[n] or 0) + 16 and hn >= h - 8 and hn <= h + 8 and not W[n] then
+            if underRoof(n) then add[n] = false else add[n] = hn end
+          end
+        end
+      end
+      local na2 = 0
+      for n, hn in pairs(add) do
+        na2 = na2 + 1
+        if na2 % 256 == 0 then tick() end
+        if hn then rockTop[n] = hn end
+      end
+      tick()
+    end
+    -- distance to an edge: a voxel beside it that lies well below
+    local INF = 9
+    local dist = {}
+    local q, qh = {}, 1
+    local n4 = 0
+    for k, h in pairs(rockTop) do
+      n4 = n4 + 1
+      if n4 % 64 == 0 then tick() end
+      local vx = (k - 1) % vcols
+      local edge = false
+      for i4 = 1, 4 do
+          local n = nbr4(k, vx, i4)
+        local hn = n and H[n]
+        if hn and not rockTop[n] and hn < h - 8 then edge = true break end
+        if hn and rockTop[n] and hn < h - 12 then edge = true break end
+      end
+      if edge then dist[k] = 0; q[#q + 1] = k end
+    end
+    while qh <= #q do
+      if qh % 128 == 0 then tick() end
+      local k = q[qh]; qh = qh + 1
+      local d = dist[k] + 1
+      if d < 3 then
+        local vx = (k - 1) % vcols
+        for i4 = 1, 4 do
+          local n = nbr4(k, vx, i4)
+          if n and rockTop[n] and dist[n] == nil then dist[n] = d; q[#q + 1] = n end
+        end
+      end
+    end
+    -- Mounds: the art draws a mountain as boulders, each ringed by a dark
+    -- outline (like a forest's crowns).  Judged in 2x2-voxel blocks (8 px:
+    -- fewer distinct heights, fewer faces): a block whose art is clearly
+    -- darker than the rock around it is a seam between boulders; the top
+    -- falls toward the seams, so every boulder the art draws is a mound.
+    -- The art's lightness goes straight into its block's sum.
+    local BL = 2
+    local bcols = floor((vcols + BL - 1) / BL)
+    local NB = { -1, 1, -bcols, bcols }
+    local blum, bn = {}, {}
+    local nl = 0
+    for k in pairs(rockTop) do
+      nl = nl + 1
+      if nl % 128 == 0 then tick() end
+      local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+      local wx, wy = grid.px + vx * VOXEL + 2, grid.py + vy * VOXEL + 2
+      -- (the art lifted by the rock's height, not by its facade mapping:
+      -- that one depends on where the build window cuts a long run, and the
+      -- mounds would change shape as you walk)
+      local r, g, b = color(wx, wy - (rockTop[k] - (FL[k] or 0)))
+      if r then
+        if b > g * 1.15 and b > r * 1.4 then
+          rockTop[k] = nil
+        else
+          local bb = floor(vy / BL) * bcols + floor(vx / BL) + 1
+          blum[bb] = (blum[bb] or 0) + luminance(r, g, b)
+          bn[bb] = (bn[bb] or 0) + 1
+        end
+      end
+    end
+    for b, n in pairs(bn) do blum[b] = blum[b] / n end
+    local seam = {}
+    local nb = 0
+    for b, l in pairs(blum) do
+      nb = nb + 1
+      if nb % 64 == 0 then tick() end
+      local sum, n = 0, 0
+      for oy = -2, 2 do
+        for ox = -2, 2 do
+          local m = blum[b + oy * bcols + ox]
+          if m then sum, n = sum + m, n + 1 end
+        end
+      end
+      if n >= 6 and l < sum / n - 0.06 then seam[b] = true end
+    end
+    -- a seam is a line: a lone dark block (the art's own small speckle,
+    -- repeating every 8 px on a cliff top) is no seam, or every other
+    -- block would sink and the top would turn into a comb
+    local lone = {}
+    local nl2 = 0
+    for b in pairs(seam) do
+      nl2 = nl2 + 1
+      if nl2 % 128 == 0 then tick() end
+      if not (seam[b - 1] or seam[b + 1] or seam[b - bcols] or seam[b + bcols]) then lone[#lone + 1] = b end
+    end
+    for _, b in ipairs(lone) do seam[b] = nil end
+    -- distance (blocks) to a seam
+    local bd = {}
+    local bq, bh = {}, 1
+    for b in pairs(seam) do bd[b] = 0; bq[#bq + 1] = b end
+    while bh <= #bq do
+      if bh % 128 == 0 then tick() end
+      local b = bq[bh]; bh = bh + 1
+      local d = bd[b] + 1
+      if d <= 2 then
+        for i4 = 1, 4 do
+          local n = b + NB[i4]
+          if blum[n] and bd[n] == nil then bd[n] = d; bq[#bq + 1] = n end
+        end
+      end
+    end
+    local MOUND = opts.rockDepth == "deep" and { [0] = 12, 6 } or { [0] = 6, 2 }
+    local SHOULDER = opts.rockDepth == "deep" and { [0] = 12, 6, 2 } or { [0] = 6, 2 }
+    local capF = opts.rockDepth == "deep" and 0.25 or 0.2
+    -- one drop per block (the nearest edge and the lowest top in it), so
+    -- neighbouring voxels never part into thin fins
+    local bdrop, btall = {}, {}
+    local nd = 0
+    for k, h in pairs(rockTop) do
+      nd = nd + 1
+      if nd % 64 == 0 then tick() end
+      local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+      local b = floor(vy / BL) * bcols + floor(vx / BL) + 1
+      local d = SHOULDER[dist[k] or INF] or 0
+      local m = MOUND[bd[b] or INF] or 0
+      if m > d then d = m end
+      if d > (bdrop[b] or 0) then bdrop[b] = d end
+      local t = h - (FL[k] or 0)
+      if not btall[b] or t < btall[b] then btall[b] = t end
+    end
+    -- no cliff between neighbouring blocks: a block sinks at most 6 px
+    -- below the blocks around it (twice, so steps run 0, 6, 12)
+    for _ = 1, 2 do
+      local lim = {}
+      local nb2 = 0
+      for b, d in pairs(bdrop) do
+        nb2 = nb2 + 1
+        if nb2 % 64 == 0 then tick() end
+        local m = d
+        for i = 1, 4 do
+          local n = b + NB[i]
+          local dn = blum[n] and (bdrop[n] or 0)
+          if dn and dn + 6 < m then m = dn + 6 end
+        end
+        lim[b] = m
+      end
+      bdrop = lim
+      tick()
+    end
+    local shaped = 0
+    local ns = 0
+    for k, h in pairs(rockTop) do
+      ns = ns + 1
+      if ns % 128 == 0 then tick() end
+      local vx, vy = (k - 1) % vcols, floor((k - 1) / vcols)
+      local b = floor(vy / BL) * bcols + floor(vx / BL) + 1
+      local drop = bdrop[b] or 0
+      local tall = btall[b] or 0
+      if drop > tall * capF * 2 then drop = floor(tall * capF) * 2 end
+      if drop > 0 then
+        local top = h - drop
+        H[k] = top
+        if top < S[k] then C[k] = C[k] + (S[k] - top); S[k] = top end
+        shaped = shaped + 1
+      end
+    end
+    grid.rockShaped = shaped
   end
 
   -- RSE: roofs side by side on one front wall are one building even when
@@ -2192,6 +2813,396 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- fountain three cells deep was given a roof, or stood tall enough.)
   grid.anyWindows = false
   grid.buildings = 0
+  -- Windows (lit at night, scene.lua): found in each building's own art,
+  -- judged in 4 px blocks (the art known everywhere -- the map's picture
+  -- near the camera, the tiles' learned art elsewhere -- is known at that
+  -- grain, so the verdict does not change as you walk).  A window is a
+  -- small patch of glass -- bluish, or the dark pane of a darker window --
+  -- set off from the wall around it, enclosed by the building on every
+  -- side.  The long siding stripes of a facade, the outline round a
+  -- building and a sign's band are too long or not enclosed; a roof's art
+  -- (the gable over it, heightfield's roofs) is never looked at.  Upper
+  -- floors drawn on a tall building's top faces count the same: the
+  -- verdict is by where the art is, not by which face shows it.
+  -- grid.winL[k]: which pixels of the block are glass, packed: 0.5 for
+  -- a light pane (glass is lighter than its frame) plus half the
+  -- brightness that parts them (the shader lights the glass, not the
+  -- frame); grid.winI[k]: the window's number.
+  -- Pokemon Tower (Lavender Town): only its lowest row, the lobby, is lit.
+  local winL, winI, winT, winH = {}, {}, {}, {}
+  grid.winL, grid.winI, grid.winT, grid.winH, grid.winCount, grid.windows = winL, winI, winT, winH, 0, 0
+  local findWindows = color ~= nil and opts.indoor ~= true and opts.windows ~= false
+  local mapName = tostring(opts.mapId or provider.mapId or "")
+  local towerMap = mapName:upper():find("LAVENDER", 1, true) ~= nil
+  local roofArt
+  local function inRoofArt(k)
+    if not roofArt then
+      roofArt = {}
+      for _, r in ipairs(grid.roofs or {}) do
+        tick()
+        local vx1 = floor((r.x1 - grid.px) / VOXEL)
+        local vx2 = floor((r.x2 - 1 - grid.px) / VOXEL)
+        local va, vb = r.k * r.y0 + r.c, r.k * r.y1 + r.c
+        local vy1 = floor((min(va, vb) - grid.py) / VOXEL)
+        local vy2 = floor((max(va, vb) - 1 - grid.py) / VOXEL)
+        for vy = max(0, vy1), min(vrows - 1, vy2) do
+          for vx = max(0, vx1), min(vcols - 1, vx2) do roofArt[vy * vcols + vx + 1] = true end
+        end
+      end
+    end
+    return roofArt[k] == true
+  end
+  local function doorish(x, y)
+    local c = at(x, y)
+    return c ~= nil and (c.kind == "door" or c.warpDoor == true)
+  end
+  -- glass: bluish, or a dark pane (never warm: brick, wood, roof tiles)
+  -- (clearly blue, not the pale periwinkle of siding: Lilycove's
+  -- Department Store is striped in two of those, block by block)
+  local function isGlass(r, g, b)
+    local l = 0.299 * r + 0.587 * g + 0.114 * b
+    return (b >= r + 0.05 and b - r >= b * 0.35 and b >= g - 0.04 and l < 0.9)
+      or (l < 0.32 and b >= r - 0.02 and b >= g - 0.06)
+  end
+  local cbuf = {}
+  local function detectWindows(cells)
+    -- the building's cells (inCell), and of its blocks only the window
+    -- glass keeps its art: colour GR, GG, GB, brightness GL, whether it is
+    -- a roof's art BF; the wall round a pane is read again where it is
+    -- needed (a table for every block of a big building -- the cliffs and
+    -- fences joined to a house on a route -- was tens of MB of garbage)
+    local inCell = {}
+    for _, q in ipairs(cells) do inCell[(q[2] - y0) * cols + (q[1] - x0)] = true end
+    local GR, GG, GB, GL, BF = {}, {}, {}, {}, {}
+    -- glass: bluish, or a dark pane (never warm: brick, wood, roof tiles)
+    -- cand[k]: 1 a blue pane's block, 2 a dark one's
+    local cand = {}
+    local nb, roofN = 0, 0
+    for _, q in ipairs(cells) do
+      tick()
+      local vx0, vy0 = (q[1] - x0) * PER, (q[2] - y0) * PER
+      -- (a door's glass is no window, nor the glass over it -- the lower
+      -- half of the cell above: the doorway's own light is lit already)
+      local inDoor, overDoor = doorish(q[1], q[2]), doorish(q[1], q[2] + 1)
+      for j = 0, PER - 1 do
+        for i = 0, PER - 1 do
+          local k = (vy0 + j) * vcols + vx0 + i + 1
+          local wx, wy = grid.px + (vx0 + i) * VOXEL, grid.py + (vy0 + j) * VOXEL
+          local r, g, b = color(wx + 2, wy + 2)
+          if r then
+            nb = nb + 1
+            local rf = inRoofArt(k) and true or false
+            if rf then roofN = roofN + 1 end
+            -- (only on what stands a storey tall: a fence or a post joined
+            -- to a house is no wall with windows)
+            if not inDoor and not (j >= PER / 2 and overDoor) and (H[k] or 0) - (FL[k] or 0) >= 14 then
+              -- (a pane need not start on the block's grain: a block whose
+              -- middle is frame but whose corner is glass is glass too)
+              local gr, gg, gb
+              if isGlass(r, g, b) then
+                gr, gg, gb = r, g, b
+              else
+                for c4 = 1, 4 do
+                  local r2, g2, b2 = color(wx + (c4 % 2 == 1 and 1 or 3), wy + (c4 <= 2 and 1 or 3))
+                  if r2 and isGlass(r2, g2, b2) then gr, gg, gb = r2, g2, b2 break end
+                end
+              end
+              if gr then
+                GR[k], GG[k], GB[k], GL[k], BF[k] = gr, gg, gb, 0.299 * gr + 0.587 * gg + 0.114 * gb, rf
+                -- two kinds, never joined into one patch: a blue pane, and
+                -- the dark of a frame or a darker pane (a window's dark
+                -- mullion joined its two blue halves into one patch too
+                -- wide to be a window)
+                cand[k] = (gb >= gr + 0.05 and gb - gr >= gb * 0.35) and 1 or 2
+              end
+            end
+          end
+        end
+      end
+    end
+    if nb < 16 then return end
+    -- windows: small patches of glass, enclosed by the building, set off
+    -- from the wall all round them (in brightness or in colour)
+    local seenC = {}
+    local found = {}
+    local m = 0
+    for k in pairs(cand) do
+      m = m + 1
+      if m % 64 == 0 then tick() end
+      if not seenC[k] then
+        -- (the patch is gathered in one buffer, used again patch after
+        -- patch; a window keeps a copy)
+        local comp = cbuf
+        local nq, qh = 1, 1
+        comp[1] = k
+        seenC[k] = true
+        local minx, maxx, miny, maxy = 1e9, -1, 1e9, -1
+        while qh <= nq do
+          local c = comp[qh]; qh = qh + 1
+          local cx, cy = (c - 1) % vcols, floor((c - 1) / vcols)
+          if cx < minx then minx = cx end
+          if cx > maxx then maxx = cx end
+          if cy < miny then miny = cy end
+          if cy > maxy then maxy = cy end
+          for i4 = 1, 4 do
+            local d = D4_EWSN[i4]
+            local nx = cx + d[1]
+            if nx >= 0 and nx < vcols then
+              local nk = c + d[2] * vcols + d[1]
+              if cand[nk] == cand[c] and not seenC[nk] then seenC[nk] = true; nq = nq + 1; comp[nq] = nk end
+            end
+          end
+        end
+        comp[nq + 1] = nil
+        local w, h = maxx - minx + 1, maxy - miny + 1
+        -- (a wide shop window is a window too, if it is a pane and not a
+        -- band: two blocks tall at least)
+        if nq <= 48 and h <= 5 and (w <= 6 or (h >= 2 and w <= 12)) and nq >= (w * h) * 0.5 then
+          local ring, inside, rl, rr, rg, rb = 0, 0, 0, 0, 0, 0
+          local gold = 0
+          for y = miny - 1, maxy + 1 do
+            for x = minx - 1, maxx + 1 do
+              if x == minx - 1 or x == maxx + 1 or y == miny - 1 or y == maxy + 1 then
+                local rk = (x >= 0 and x < vcols and y >= 0 and y < vrows) and (y * vcols + x + 1) or nil
+                local br, bg, bb
+                if rk and inCell[floor(y / PER) * cols + floor(x / PER)] then
+                  br, bg, bb = color(grid.px + x * VOXEL + 2, grid.py + y * VOXEL + 2)
+                end
+                local bc = br ~= nil
+                -- (past the map's own edge -- the border -- does not count:
+                -- Lilycove's Department Store runs up to the top of its map)
+                local rc = at(x0 + floor(x / PER), y0 + floor(y / PER))
+                if bc or not (rc == nil or rc.border) then ring = ring + 1 end
+                if bc and cand[rk] ~= cand[comp[1]] then
+                  -- (gold beside it: an emblem -- the Mart's ball on its
+                  -- sign -- not a window in a wall)
+                  if br > 0.7 and bg > 0.55 and br - bb > 0.45 then gold = gold + 1 end
+                  inside = inside + 1
+                  rr, rg, rb, rl = rr + br, rg + bg, rb + bb, rl + 0.299 * br + 0.587 * bg + 0.114 * bb
+                end
+              end
+            end
+          end
+          if inside >= ring * 0.75 then
+            local cr, cg, cb, cl = 0, 0, 0, 0
+            for _, c in ipairs(comp) do
+              cr, cg, cb, cl = cr + GR[c], cg + GG[c], cb + GB[c], cl + GL[c]
+            end
+            local nc = nq
+            cr, cg, cb, cl = cr / nc, cg / nc, cb / nc, cl / nc
+            rr, rg, rb, rl = rr / inside, rg / inside, rb / inside, rl / inside
+            local dl = math.abs(cl - rl)
+            local dc = math.sqrt((cr - rr) ^ 2 + (cg - rg) ^ 2 + (cb - rb) ^ 2)
+            -- (a speck or two beside a door is its frame's corner)
+            -- (every one of its blocks beside the door -- a window next to
+            -- a door reaches past it -- and how much of it is in a roof's
+            -- art is counted: nothing hangs on which block was found first)
+            local byDoor = false
+            if nc <= 2 then
+              byDoor = true
+              for _, c1 in ipairs(comp) do
+                local dcx = x0 + floor(((c1 - 1) % vcols) / PER)
+                local dcy = y0 + floor(floor((c1 - 1) / vcols) / PER)
+                local near = false
+                for oy = 0, 1 do
+                  if doorish(dcx - 1, dcy + oy) or doorish(dcx + 1, dcy + oy) then near = true end
+                end
+                if not near then byDoor = false end
+              end
+            end
+            local nRoof = 0
+            for _, c in ipairs(comp) do if BF[c] then nRoof = nRoof + 1 end end
+            -- (gold beside a pane mostly in a roof's art is an emblem or the
+            -- roof's own trim -- the eaves of Saffron's houses; but only a
+            -- pane wholly in it must have a twin, as a roof's windows do)
+            local inRoof, mostRoof = nRoof == nc, nRoof * 2 > nc
+            -- (only in a roof's art, where the Mart's sign is: a yellow
+            -- wall round real windows is no emblem -- Saffron, Vermilion)
+            if byDoor or (gold >= 2 and mostRoof) then dl, dc = 0, 0 end
+            -- (a sliver one block wide and taller than that is a frame's
+            -- or a pillar's edge, not a pane)
+            if w == 1 and h >= 2 then dl, dc = 0, 0 end
+            -- (a wide one is a pane two rows deep at least -- rows half
+            -- full or more -- not the frame of a band with its two legs:
+            -- the eaves of some of Saffron's houses, lit as a gold bracket)
+            if w >= 7 then
+              local rowN = {}
+              for ci = 1, nq do
+                local ry = floor((comp[ci] - 1) / vcols) - miny + 1
+                rowN[ry] = (rowN[ry] or 0) + 1
+              end
+              local full = 0
+              for ry = 1, h do if (rowN[ry] or 0) * 2 >= w then full = full + 1 end end
+              if full < 2 then dl, dc = 0, 0 end
+            end
+            -- (dark beside blue glass is that window's frame, not a pane)
+            if cand[comp[1]] == 2 then
+              for _, c in ipairs(comp) do
+                local cx = (c - 1) % vcols
+                if (cx > 0 and cand[c - 1] == 1) or (cx < vcols - 1 and cand[c + 1] == 1)
+                    or cand[c - vcols] == 1 or cand[c + vcols] == 1 then
+                  dl, dc = 0, 0
+                  break
+                end
+              end
+            end
+            if dl >= 0.10 or dc >= 0.18 then
+              -- which of the window block's pixels are its glass: those
+              -- clear of its frame -- lighter than the darkest of what is
+              -- round it, for a light pane; for a dark pane, as dark as it
+              -- which of the window block's pixels are its glass: for a
+              -- blue pane, the bluish ones clear of its (darker) frame;
+              -- for a dark pane, those about as dark as it
+              local bright = cand[comp[1]] == 1
+              local lo, hi = 1, 0
+              for _, c in ipairs(comp) do
+                local gl = GL[c]
+                if gl < lo then lo = gl end
+                if gl > hi then hi = gl end
+              end
+              local thr = bright and (lo - 0.12) or (hi + 0.12)
+              -- (and not the wall's lighter shade round a pane: up to just
+              -- over the lightest glass)
+              local top = bright and (hi + 0.05) or 1
+              local keepC = {}
+              for ci = 1, nq do keepC[ci] = comp[ci] end
+              found[#found + 1] = { comp = keepC, l = cl, y = (miny + maxy) / 2, x = minx, ym = miny, w = w, h = h,
+                roof = inRoof, mostRoof = mostRoof, bright = bright, thr = thr, top = top }
+            end
+          end
+        end
+      end
+    end
+    if #found == 0 then return end
+    -- In a roof's art (heightfield's roofs) a window must be one of a pair
+    -- or a row of alike ones -- a tall facade given a roof keeps its upper floors
+    -- there (Lilycove's Department Store) -- never a lone emblem (a Poke
+    -- Center's ball, a Mart's sign) or the lattice of a tiled roof (a
+    -- Mart's blue grid: a building whose roof art is that dense has none).
+    -- (dense: more than one "window" for every 3 cells of roof art --
+    -- a lattice, where a tall facade's windows are spread out)
+    local roofW = 0
+    for _, f in ipairs(found) do if f.roof then roofW = roofW + 1 end end
+    local dense = roofN > 0 and roofW * 48 > roofN
+    local keep = {}
+    tick()
+    for fi, f in ipairs(found) do
+      if fi % 16 == 0 then tick() end
+      local ok = true
+      if f.roof then
+        if dense then
+          ok = false
+        else
+          local alike = 0
+          for _, g2 in ipairs(found) do
+            if g2 ~= f and g2.roof and g2.w == f.w and g2.h == f.h and math.abs(g2.y - f.y) <= 1 then alike = alike + 1 end
+          end
+          ok = alike >= 1
+        end
+      end
+      -- A speck -- one or two blocks -- is a window only as one of a row of
+      -- alike ones (two others for a dark speck): a lone one is where two
+      -- strips of trim cross (Devon's facade), a bolt, a notch in a roof.
+      -- Alike means the same glass too: a row of panes shares one colour,
+      -- where a Mart's emblem beside a neighbour's windows does not.
+      -- (and never in a roof's art: there a speck is the corner of its
+      -- trim, and its twin on the next house is no row of windows)
+      if ok and #f.comp <= 2 and f.mostRoof then ok = false end
+      if ok and #f.comp <= 2 then
+        local alike = 0
+        for _, g2 in ipairs(found) do
+          if g2 ~= f and #g2.comp <= 2 and not g2.mostRoof and g2.w == f.w and g2.h == f.h and g2.bright == f.bright
+              and math.abs(g2.y - f.y) <= 0.5 and math.abs(g2.x - f.x) <= 16 and math.abs(g2.l - f.l) <= 0.08 then
+            alike = alike + 1
+          end
+        end
+        ok = alike >= (f.bright and 1 or 2)
+      end
+      -- A small pane that is not a full rectangle (an arched window: the arches
+      -- come as a row of alike ones) must have a twin: a lone odd shape
+      -- is an emblem -- the ball on a Mart's sign
+      if ok and f.w <= 4 and f.h <= 4 and #f.comp < f.w * f.h * 0.75 then
+        local twin = false
+        for _, g2 in ipairs(found) do
+          if g2 ~= f and g2.w == f.w and g2.h == f.h and #g2.comp == #f.comp then twin = true break end
+        end
+        ok = twin
+      end
+      if ok then keep[#keep + 1] = f end
+    end
+    found = keep
+    if #found == 0 then return end
+    -- Pokemon Tower: a tall facade of window rows; only the lobby's lit
+    if towerMap then
+      -- (a door-connected block can hold several buildings: the windows
+      -- are grouped by facade -- near each other -- and only a facade of
+      -- four rows or more is the tower)
+      local group = {}
+      local ng = 0
+      for i, f in ipairs(found) do
+        if not group[i] then
+          ng = ng + 1
+          group[i] = ng
+          local stack = { i }
+          while #stack > 0 do
+            local a2 = table.remove(stack)
+            local fa = found[a2]
+            for j, fb in ipairs(found) do
+              if not group[j] and math.abs(fa.x - fb.x) <= 6 and math.abs(fa.y - fb.y) <= 5 then
+                group[j] = ng
+                stack[#stack + 1] = j
+              end
+            end
+          end
+        end
+      end
+      local drop = {}
+      for gi = 1, ng do
+        local members = {}
+        for i, f in ipairs(found) do if group[i] == gi then members[#members + 1] = f end end
+        table.sort(members, function(p1, p2) return p1.y < p2.y end)
+        local rows, lastY = 0, nil
+        local count = {}
+        for _, f in ipairs(members) do
+          if not lastY or f.y - lastY > 2 then rows = rows + 1 end
+          f.row = rows
+          lastY = f.y
+          count[rows] = (count[rows] or 0) + 1
+        end
+        if rows >= 4 then
+          -- the lowest row of the window grid (a stray pane or two below
+          -- it is no row)
+          local lobby = rows
+          while lobby > 1 and (count[lobby] or 0) < 3 do lobby = lobby - 1 end
+          for _, f in ipairs(members) do if f.row ~= lobby then drop[f] = true end end
+          -- (and with LIVED-IN WINDOWS, every other lobby window -- at
+          -- least half of them -- stays lit: the tower is open at night)
+          local lob = {}
+          for _, f in ipairs(members) do if f.row == lobby then lob[#lob + 1] = f end end
+          table.sort(lob, function(p1, p2) return p1.x < p2.x end)
+          for i = 1, #lob, 2 do lob[i].always = true end
+        end
+      end
+      local keep = {}
+      for _, f in ipairs(found) do if not drop[f] then keep[#keep + 1] = f end end
+      found = keep
+    end
+    for _, f in ipairs(found) do
+      grid.windows = grid.windows + 1
+      -- (its number from where it is on the map, not from the order it
+      -- was found in: the same window is the same one in every build --
+      -- the view's, the whole map's, after a warp and back)
+      local ax, ay = floor(grid.px / VOXEL) + f.x, floor(grid.py / VOXEL) + f.ym
+      local id = (ax * 131 + ay * 977) % 251 + 1
+      for _, c in ipairs(f.comp) do
+        -- (the pane's test: its threshold, and on which side of it)
+        winL[c], winI[c] = (f.bright and 0.5 or 0) + math.max(0, math.min(1, f.thr)) * 0.498, id
+        winT[c] = math.max(0, math.min(1, f.top))
+        if f.always then winH[c] = 0.6 end
+        grid.winCount = grid.winCount + 1
+      end
+    end
+  end
   do
     local seen = {}
     local function key(x, y) return (y - y0 + 64) * 65536 + (x - x0 + 64) end
@@ -2216,7 +3227,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
             cells[#cells + 1] = q
             local x, y = q[1], q[2]
             if isDoor(at(x, y)) or isDoor(at(x, y + 1)) then door = true end
-            for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+            for _, d in ipairs(D4_EWSN) do
               local nx, ny = x + d[1], y + d[2]
               local kk = key(nx, ny)
               if not seen[kk] and part(nx, ny) then
@@ -2234,6 +3245,7 @@ function HF.build(provider, x0, y0, cols, rows, opts)
                 for i = 0, PER - 1 do grid.B[base + j * vcols + i] = true end
               end
             end
+            if findWindows then detectWindows(cells) end
           end
         end
       end
@@ -2886,29 +3898,40 @@ function HF.build(provider, x0, y0, cols, rows, opts)
   -- Shores: how far each water voxel lies from land (0 beside it, 1 four
   -- voxels -- 16 px -- out or further), for the foam and the waves rolling
   -- in (scene.lua, through the light bake's alpha).
-  if grid.hasWater then
-    local SH, q, qh = {}, {}, 1
-    local WATER = HF.WATER
-    for k = 1, vcols * vrows do
-      tick()
-      if H[k] ~= WATER then SH[k] = 0; q[#q + 1] = k end
-    end
-    while qh <= #q do
-      if qh % 4096 == 0 then tick() end
-      local k = q[qh]; qh = qh + 1
-      local d = SH[k] + 0.25
-      if d <= 1 then
-        local vx = (k - 1) % vcols
-        if vx > 0 and SH[k - 1] == nil then SH[k - 1] = d; q[#q + 1] = k - 1 end
-        if vx < vcols - 1 and SH[k + 1] == nil then SH[k + 1] = d; q[#q + 1] = k + 1 end
-        if k > vcols and SH[k - vcols] == nil then SH[k - vcols] = d; q[#q + 1] = k - vcols end
-        if k + vcols <= vcols * vrows and SH[k + vcols] == nil then SH[k + vcols] = d; q[#q + 1] = k + vcols end
-      end
-    end
-    grid.shore = SH
-  end
+  if grid.hasWater then HF.shore(grid, tick) end
 
   return grid
+end
+
+-- Shores (grid.shore), from the heights alone: made by the build, and
+-- again for a light bake of a whole map kept without them (bridge.lua).
+-- (SH and the queue at their full size up front: grown, each doubling was
+-- copied whole in one go)
+function HF.shore(grid, tick)
+  tick = tick or function() end
+  local H, vcols, vrows = grid.H, grid.vcols, grid.vrows
+  local n = vcols * vrows
+  local SH, q, qh = tnew(n, 0), tnew(n, 0), 1
+  local nq = 0
+  local WATER = HF.WATER
+  for k = 1, n do
+    if k % 2048 == 0 then tick() end
+    if H[k] ~= WATER then SH[k] = 0; nq = nq + 1; q[nq] = k end
+  end
+  while qh <= nq do
+    if qh % 4096 == 0 then tick() end
+    local k = q[qh]; qh = qh + 1
+    local d = SH[k] + 0.25
+    if d <= 1 then
+      local vx = (k - 1) % vcols
+      if vx > 0 and SH[k - 1] == nil then SH[k - 1] = d; nq = nq + 1; q[nq] = k - 1 end
+      if vx < vcols - 1 and SH[k + 1] == nil then SH[k + 1] = d; nq = nq + 1; q[nq] = k + 1 end
+      if k > vcols and SH[k - vcols] == nil then SH[k - vcols] = d; nq = nq + 1; q[nq] = k - vcols end
+      if k + vcols <= n and SH[k + vcols] == nil then SH[k + vcols] = d; nq = nq + 1; q[nq] = k + vcols end
+    end
+  end
+  grid.shore = SH
+  return SH
 end
 
 -- How far a roof's ridge rises above its eaves: shallower on narrow

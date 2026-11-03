@@ -16,6 +16,15 @@
 local Lighting = {}
 
 local floor, min, max = math.floor, math.min, math.max
+-- (arrays over every voxel of a whole map are made at their full size up
+-- front where LuaJIT can: grown one entry at a time, each doubling copied
+-- the whole array in one go -- 5-8 ms on a desktop, several times that on
+-- a phone, inside a single background slice)
+local tnew = (function()
+  local ok, f = pcall(require, "table.new")
+  if ok and type(f) == "function" then return f end
+  return function() return {} end
+end)()
 
 -- world px a shadow travels per px of height: +x (east), +y (south)
 Lighting.SUN_X, Lighting.SUN_Y = 0.7, 0.45
@@ -30,8 +39,11 @@ function Lighting.bake(grid, VOXEL, opts)
   local vcols, vrows = grid.vcols, grid.vrows
   -- sloped roofs cast their ridge: bake over the heights with roofs added
   if grid.roofs and #grid.roofs > 0 then
-    local R = {}
-    for i = 1, vcols * vrows do R[i] = H[i] end
+    local R = tnew(vcols * vrows, 0)
+    for i = 1, vcols * vrows do
+      R[i] = H[i]
+      if i % 8192 == 0 then tick() end
+    end
     tick()
     for _, r in ipairs(grid.roofs) do
       tick()
@@ -45,6 +57,7 @@ function Lighting.bake(grid, VOXEL, opts)
       local vy1 = max(0, floor((r.y0 - grid.py) / VOXEL))
       local vy2 = min(vrows - 1, floor((r.y1 - grid.py) / VOXEL) - 1)
       for vy = vy1, vy2 do
+        if (vy - vy1) % 8 == 7 then tick() end
         for vx = vx1, vx2 do
           local cx = grid.px + (vx + 0.5) * VOXEL
           local cy = grid.py + (vy + 0.5) * VOXEL
@@ -60,12 +73,13 @@ function Lighting.bake(grid, VOXEL, opts)
   -- opts.sunX/sunY: the sun of the hour (daynight.lua); the default is
   -- the classic afternoon sun from the north-west
   local sunX, sunY = opts.sunX or Lighting.SUN_X, opts.sunY or Lighting.SUN_Y
-  local SUN, AO = {}, {}
+  local SUN, AO = tnew(vcols * vrows, 0), tnew(vcols * vrows, 0)
 
   local maxH = 0
   for i = 1, vcols * vrows do
     local h = H[i]
     if h > maxH then maxH = h end
+    if i % 16384 == 0 then tick() end
   end
   tick()
   -- (every pass over all of a whole map's voxels gives the frame back row by
@@ -75,7 +89,7 @@ function Lighting.bake(grid, VOXEL, opts)
   -- where nothing around stands above a top, it has no occlusion to add up
   local M5
   do
-    local R5 = {}
+    local R5 = tnew(vcols * vrows, 0)
     for vy = 0, vrows - 1 do
       tick()
       local b = vy * vcols
@@ -91,7 +105,7 @@ function Lighting.bake(grid, VOXEL, opts)
         R5[b + vx + 1] = m
       end
     end
-    M5 = {}
+    M5 = tnew(vcols * vrows, 0)
     for vy = 0, vrows - 1 do
       tick()
       for vx = 0, vcols - 1 do
@@ -237,7 +251,10 @@ function Lighting.glow(grid, VOXEL)
         local own = l.kind == "lamp" and math.floor(wx / 16) == math.floor(l.x / 16)
           and math.floor(wy / 16) == math.floor(l.y / 16)
         if own then d = 0 end
-        if d < 1 and ((H[k] or 0) <= 4 or own) then
+        -- (the ground: at its floor -- raised ground (RAISED GROUND) stands
+        -- on a plateau, FL)
+        local floorK = (grid.FL and grid.FL[k]) or 0
+        if d < 1 and ((H[k] or 0) <= floorK + 4 or own) then
           local q = 1 - d
           local v = l.s * q * q * (3 - 2 * q)
           local o = G[k] or 0
@@ -263,10 +280,34 @@ end
 
 -- The bake as image data: red = sun, green = ambient occlusion,
 -- blue = 1 - night light.
+-- With windows (heightfield.lua grid.winL), the image is twice as tall:
+-- the lower half marks the art's window panes, by where the art is (not
+-- where the face showing it stands): red = a window, green = which of its
+-- pixels are glass (heightfield.lua grid.winL), blue = its own random
+-- number (0..1, from its place on the map), alpha =
+-- the lightest its glass is (scene.lua lights them at night).
 function Lighting.imageData(grid, tick)
   tick = tick or function() end
   local w, h = grid.vcols, grid.vrows
-  local data = love.image.newImageData(w, h)
+  local wins = (grid.winCount or 0) > 0 and grid.winL
+  local data = love.image.newImageData(w, wins and h * 2 or h)
+  if wins then
+    local WI, WT, WH = grid.winI or {}, grid.winT or {}, grid.winH or {}
+    local n = 0
+    for k, l in pairs(wins) do
+      n = n + 1
+      if n % 1024 == 0 then tick() end
+      local x, y = (k - 1) % w, floor((k - 1) / w)
+      local id = WI[k] or 0
+      -- (blue: the window's own random number, made here -- a phone's
+      -- shader works in half precision, where the usual sin() hash of a
+      -- number came out 0 for every window, and every window went dark)
+      -- (a window that always stays lit -- half the Pokemon Tower lobby
+      -- -- carries a value the shader always lights: 0.6)
+      local hv = WH[k] or (id * 0.6180339887 + 0.137) % 1
+      data:setPixel(x, h + y, 1, math.max(0, math.min(1, l)), hv, WT[k] or 1)
+    end
+  end
   local SUN, AO, GLOW = grid.sun, grid.ao, grid.glow
   local SH = grid.shore
   for y = 0, h - 1 do

@@ -35,6 +35,7 @@ varying LOVE_HIGHP_OR_MEDIUMP vec3 vSampleK;
 varying LOVE_HIGHP_OR_MEDIUMP float vDepth;
 varying LOVE_HIGHP_OR_MEDIUMP vec2 vWorld;
 varying float vZ; // height above the ground (terrain): night light fades up walls
+varying LOVE_HIGHP_OR_MEDIUMP vec2 vArt; // where in the art (mesh space px): the windows' mask
 // reflections: the scene drawn again mirrored in the water's plane.
 // (One uniform per stage: a uniform shared by both must match in
 // precision, and a phone's vertex stage defaults to highp, its pixel stage
@@ -114,6 +115,7 @@ vec4 position(mat4 transform_projection, vec4 vertex_position) {
   vSampleK = vec3((VertexTexCoord.xy + uShift) * k, k);
   vDepth = -viewPos.z;
   vWorld = vertex_position.xy; // mesh space, same as the light bake
+  vArt = VertexTexCoord.xy;
   vZ = vertex_position.z;
   return clip;
 }
@@ -138,6 +140,9 @@ uniform vec3 uTint;      // time of day: the colour everything is lit with
 uniform float uDesat;    // ...and how much colour is washed out first (moonlight)
 uniform float uTime;     // seconds, for the water's ripple
 uniform float uNight;    // 0 day .. 1 night: lamps, doorways and windows light up
+uniform float uWinOn;    // 1: the light bake carries the windows' mask (its lower half)
+uniform float uWinLife;  // LIVED-IN WINDOWS: each window its own (some dark, warm or cool)
+uniform float uWinPhase; // 0..63: a step every quarter hour, for the odd window switching
 uniform Image uRefl;     // the mirrored pass (reflections), screen space
 uniform float uReflOn;   // how strongly water shows it (0 = off)
 uniform vec2 uScreen;    // target size in pixels
@@ -231,7 +236,10 @@ vec4 effect(vec4 color, Image unused, vec2 tc, vec2 sc) {
   vec3 raw = c.rgb; // the art itself, before shading (window test)
   c.rgb *= color.rgb;
   float top = step(0.6, color.a) * uLit;
-  vec4 L = Texel(uLight, (vWorld - uLightRect.xy) / uLightRect.zw);
+  LOVE_HIGHP_OR_MEDIUMP vec2 luv = (vWorld - uLightRect.xy) / uLightRect.zw;
+  // (with the windows' mask below it, the light is the upper half)
+  if (uWinOn > 0.5) luv.y = clamp(luv.y, 0.0, 1.0 - 2.0 / uLightRect.w) * 0.5;
+  vec4 L = Texel(uLight, luv);
   vec3 light = mix(uShadow, vec3(1.0), L.r) * L.g;
   c.rgb *= mix(vec3(1.0), light, top);
   // clouds drifting over: their shadows slide across the ground, the walls
@@ -260,28 +268,46 @@ vec4 effect(vec4 color, Image unused, vec2 tc, vec2 sc) {
     // (plus a little warm light of its own: lawn lit only by recolouring
     // stayed green)
     lit = mix(lit, c.rgb * vec3(1.08, 0.86, 0.58) + vec3(0.16, 0.11, 0.04), pool * 0.9);
-    // lit windows: on a building's walls, glass-blue art glows warm
-    float wall = uTerrain * (1.0 - step(0.1, color.a));
-    // (a small object's walls, flag 0.03 -- a fountain's water -- are not)
-    float building = wall * (1.0 - step(0.015, color.a));
-    float l = dot(raw, LUM);
-    // (clearly blue -- grey-blue walls stay dark -- and above the ground:
-    // the banks of water below it are walls of blue art too)
-    float glass = building * step(raw.r + 0.18, raw.b) * step(raw.g - 0.02, raw.b) * step(0.38, l)
-      * step(0.5, vZ);
-    // a window is a small pane in a frame: blue all around (a fountain's
-    // water, a blue wall) is not one
-    if (glass > 0.5) {
-      LOVE_HIGHP_OR_MEDIUMP vec2 px = vec2(1.0) / uSize;
-      float around = 0.0;
-      vec4 t;
-      t = Texel(uTex, uv + vec2(0.0, 5.0 * px.y)); around += step(t.r + 0.18, t.b);
-      t = Texel(uTex, uv - vec2(0.0, 5.0 * px.y)); around += step(t.r + 0.18, t.b);
-      t = Texel(uTex, uv + vec2(6.0 * px.x, 0.0)); around += step(t.r + 0.18, t.b);
-      t = Texel(uTex, uv - vec2(6.0 * px.x, 0.0)); around += step(t.r + 0.18, t.b);
-      if (around > 3.5) glass = 0.0;
+    // lit windows: the panes heightfield.lua found in the buildings' art
+    // (the bake's lower half, by where in the art this pixel is: a tall
+    // building's upper floors on its top faces as much as its walls).
+    // In a window's 4 px block only the pixels of the pane's own shade
+    // glow, not its frame.  One texel read, nothing searched per pixel.
+    float sideWall = step(0.04, color.a) * (1.0 - step(0.06, color.a));
+    if (uWinOn > 0.5 && uTerrain > 0.5 && leaf < 0.5 && water < 0.5 && sideWall < 0.5) {
+      LOVE_HIGHP_OR_MEDIUMP vec2 wb = (floor(vArt / 4.0) + 0.5) * 4.0;
+      LOVE_HIGHP_OR_MEDIUMP vec2 wuv = (wb - uLightRect.xy) / uLightRect.zw;
+      if (wuv.x > 0.0 && wuv.x < 1.0 && wuv.y > 0.0 && wuv.y < 1.0) {
+        vec4 W = Texel(uLight, vec2(wuv.x, 0.5 + wuv.y * 0.5));
+        if (W.r > 0.5) {
+          float l = dot(raw, LUM);
+          // (green: the glass's test -- a light pane is what is lighter
+          // than the parting brightness, a dark one what is darker; never
+          // the frame, nor anything warm beside it)
+          float lightPane = step(0.5, W.g);
+          float thr = (W.g - 0.5 * lightPane) * 2.008;
+          float pane = mix(1.0 - step(thr, l), step(thr, l) * (1.0 - step(W.a, l)), lightPane)
+            * step(raw.r - 0.03, raw.b);
+          float on = 1.0;
+          vec3 warm = vec3(1.0, 0.83, 0.52);
+          if (uWinLife > 0.5) {
+            // LIVED-IN WINDOWS: each window its own, by its place on the
+            // map (the same in every build): about one in four dark, the
+            // rest a little brighter or dimmer, a few a cooler lamp; and
+            // one in eight, every quarter of an hour or so, switches
+            // (h comes ready from the light texture; everything here
+            // stays small -- a phone works in half precision)
+            float h = W.b;
+            float h2 = fract(h * 13.0);
+            float flip = step(h2, 0.125) * step(0.5, fract((uWinPhase + h * 11.0) * 0.618));
+            float lit1 = step(0.27, h);
+            on = abs(lit1 - flip) * (0.62 + 0.38 * fract(h * 7.0));
+            warm = mix(warm, vec3(0.96, 0.9, 0.74), step(0.82, fract(h * 3.7)));
+          }
+          lit = mix(lit, warm * (0.62 + 0.42 * l), pane * on * uNight * 0.82);
+        }
+      }
     }
-    lit = mix(lit, vec3(1.0, 0.84, 0.5) * (0.7 + 0.4 * l), glass * uNight * 0.9);
   }
   // reflections on water: the mirrored scene at this very pixel, swayed
   // by the same waves as the water's art
@@ -449,9 +475,36 @@ function Scene.available()
   return true
 end
 
+-- The terrain's vertices come packed (mesher.lua: blocks of 2048 vertices,
+-- 11 numbers each, no table per vertex).  Vertices first..last into `part`
+-- as the tables Mesh:setVertices takes, its tables filled again rather
+-- than made anew.
+local PACK_BLOCK = 2048
+local function unpackInto(verts, first, last, part)
+  local blocks = rawget(verts, "packed")
+  local n = 0
+  for i = first, last do
+    n = n + 1
+    local t = part[n]
+    if not t then t = {}; part[n] = t end
+    if blocks then
+      local blk = blocks[math.floor((i - 1) / PACK_BLOCK) + 1]
+      local o = ((i - 1) % PACK_BLOCK) * 11
+      for j = 1, 11 do t[j] = blk[o + j] end
+    else
+      local v = verts[i]
+      for j = 1, 11 do t[j] = v[j] end
+    end
+  end
+  for j = #part, n + 1, -1 do part[j] = nil end
+  return part
+end
+local uploadPart = {}
+
 -- A mesh that grows by half again whenever it runs out, so a walk across a
 -- busy town does not reallocate every rebuild.
 local function fill(name, verts, nv, idx, ni)
+  if rawget(verts, "packed") then verts = unpackInto(verts, 1, nv, {}) end
   local m = meshes[name]
   if nv == 0 then
     if m then m.count = 0 end
@@ -495,9 +548,7 @@ function Scene.setTerrain(verts, idx, nv, ni, tick)
   local CHUNK = 2048
   for first = 1, nv, CHUNK do
     local last = math.min(nv, first + CHUNK - 1)
-    local part = {}
-    for i = first, last do part[i - first + 1] = verts[i] end
-    mesh:setVertices(part, first)
+    mesh:setVertices(unpackInto(verts, first, last, uploadPart), first)
     tick()
   end
   mesh:setVertexMap(idx)
@@ -520,9 +571,7 @@ function Scene.makePiece(verts, idx, nv, ni, tick, x0, y0, x1, y1)
   local CHUNK = 2048
   for first = 1, nv, CHUNK do
     local last = math.min(nv, first + CHUNK - 1)
-    local part = {}
-    for i = first, last do part[i - first + 1] = verts[i] end
-    mesh:setVertices(part, first)
+    mesh:setVertices(unpackInto(verts, first, last, uploadPart), first)
     if tick then tick() end
   end
   mesh:setVertexMap(idx)
@@ -982,6 +1031,15 @@ function Scene.render(p)
   send("uTint", p.tint or { 1, 1, 1 })
   send("uDesat", p.desat or 0)
   send("uNight", p.night or 0)
+  -- (the bake is twice as tall when it carries the windows' mask)
+  local winOn = 0
+  if lit and lightRect and lightImage then
+    local okH, ih = pcall(lightImage.getHeight, lightImage)
+    if okH and ih >= math.floor(lightRect[4] / 4) * 2 - 1 then winOn = 1 end
+  end
+  send("uWinOn", winOn)
+  send("uWinLife", p.windowLife or 0)
+  send("uWinPhase", math.floor((love.timer and love.timer.getTime() or 0) / 900) % 64)
   send("uTime", (love.timer and love.timer.getTime() or 0) % 1000)
   send("uTimeV", (p.time or (love.timer and love.timer.getTime()) or 0) % 1000)
   send("uWindV", 0)
